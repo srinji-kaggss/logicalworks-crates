@@ -8,18 +8,26 @@ edition = "2024"
 [features]
 default = ["appcui"]
 appcui = ["lgwks_deps/appcui"]
+axum = ["lgwks_deps/axum"]
+tower-http = ["lgwks_deps/tower-http"]
+llm-guard = ["lgwks_deps/llm-guard"]
 bevy-ecs = ["lgwks_deps/bevy-ecs"]
 gpui = ["lgwks_deps/gpui"]
 ml-candle = ["lgwks_deps/ml-candle"]
 ml-candle-metal = ["lgwks_deps/ml-candle-metal"]
 ml-tokenizers = ["lgwks_deps/ml-tokenizers"]
+sqlite = ["lgwks_deps/sqlite"]
 all-storefront = [
     "appcui",
+    "axum",
+    "tower-http",
+    "llm-guard",
     "bevy-ecs",
     "gpui",
     "ml-candle",
     "ml-candle-metal",
     "ml-tokenizers",
+    "sqlite",
     "tokio-base",
     "tokio-time",
     "tokio-sync",
@@ -49,6 +57,15 @@ lgwks_deps = { path = "../../..", default-features = false }
 name = "appcui"
 required-features = ["appcui"]
 [[example]]
+name = "axum"
+required-features = ["axum"]
+[[example]]
+name = "tower_http"
+required-features = ["tower-http"]
+[[example]]
+name = "llm_guard"
+required-features = ["llm-guard"]
+[[example]]
 name = "bevy_ecs"
 required-features = ["bevy-ecs"]
 [[example]]
@@ -63,6 +80,9 @@ required-features = ["ml-candle-metal"]
 [[example]]
 name = "ml_tokenizers"
 required-features = ["ml-tokenizers"]
+[[example]]
+name = "sqlite"
+required-features = ["sqlite"]
 [[example]]
 name = "tokio_base"
 required-features = ["tokio-base"]

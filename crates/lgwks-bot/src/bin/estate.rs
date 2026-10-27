@@ -18,6 +18,12 @@ use lgwks_bot::task::{Disposition, task};
 use lgwks_bot::verb::{Execute, Observe};
 use lgwks_bot::{Auth, Bot, BotError, Cap, EffectLifetime, GrantSet};
 
+/// The script vocabulary on the shipped binary: what each runtime answers
+/// through the public interface. A submodule rather than inline code, so the
+/// smoke keeps one responsibility and the vocabulary keeps its own.
+#[path = "estate/vocabulary.rs"]
+mod vocabulary;
+
 /// One line to the caller's locked stdout; a write error reaches `main` as an I/O error.
 fn say(line: &str) -> std::io::Result<()> {
     writeln!(std::io::stdout().lock(), "{line}")
@@ -96,6 +102,183 @@ impl Execute for SmokeAction {
     fn domain_id(&self) -> &str {
         "smoke::action"
     }
+}
+
+/// The supervisor's process doors, proved on the shipped artifact rather than
+/// trusted from the tests: record-then-release gating, the release handshake,
+/// and every deny-builder refusal arm.
+///
+/// A gated lane that ran before its identity was recorded, an empty denial
+/// the builders accepted, or a profile a control byte slipped into would fail
+/// here rather than in a coordinator. Every line below is asserted, so a
+/// door that stops working fails the smoke.
+#[cfg(all(unix, feature = "process"))]
+async fn process_doors(mismatch: &mut Option<String>) -> std::io::Result<()> {
+    use lgwks_bot::rt::process::{Confinement, DenyBeneath, ProcessSpec, SandboxProfile};
+    use lgwks_bot::rt::supervise::{GatedIdentifiedSpawn, Supervisor, TaskOutcome};
+    use lgwks_bot::rt::time::{Instant, sleep};
+    use std::time::Duration;
+
+    // The deny builders refuse what they cannot confine, before any fork.
+    if DenyBeneath::new().validate().is_ok() {
+        record(
+            mismatch,
+            "an empty denial list must not validate".to_owned(),
+        );
+    }
+    let mut many = DenyBeneath::new();
+    for _ in 0..=DenyBeneath::MAX_PATHS {
+        many.deny("/srv/denied");
+    }
+    if many.validate().is_ok() {
+        record(
+            mismatch,
+            format!(
+                "a denial past {} paths must not validate",
+                DenyBeneath::MAX_PATHS
+            ),
+        );
+    }
+    let mut overlong = DenyBeneath::new();
+    overlong.deny(format!("/{}", "x".repeat(DenyBeneath::MAX_PATH_BYTES)));
+    if overlong.validate().is_ok() {
+        record(
+            mismatch,
+            "a denial past the path bound must not validate".to_owned(),
+        );
+    }
+    let mut one = DenyBeneath::new();
+    one.deny("/srv/denied");
+    if let Err(error) = one.validate() {
+        record(
+            mismatch,
+            format!("one absolute denial must validate: {error}"),
+        );
+    }
+    let Confinement::DenyBeneath(denied) = Confinement::deny_beneath(["/srv/denied"]) else {
+        record(
+            mismatch,
+            "deny_beneath must build the deny variant".to_owned(),
+        );
+        return Ok(());
+    };
+    if denied.validate().is_err() {
+        record(mismatch, "the built denial must validate".to_owned());
+    }
+    // The profile builders refuse what could not confine: empty sources and
+    // control bytes, eagerly at construction and again at validation.
+    if SandboxProfile::try_new(String::new()).is_ok() {
+        record(mismatch, "an empty profile must not validate".to_owned());
+    }
+    if SandboxProfile::try_new("a\x01b").is_ok() {
+        record(
+            mismatch,
+            "a profile holding a control byte must not validate".to_owned(),
+        );
+    }
+    if let Err(error) = SandboxProfile::try_new("(version 1)(allow default)") {
+        record(mismatch, format!("a plain profile must validate: {error}"));
+    }
+    let mut profile = SandboxProfile::allow_default();
+    if let Err(error) = profile.validate() {
+        record(
+            mismatch,
+            format!("the default profile must validate: {error}"),
+        );
+    }
+    // A denial names the resolved directory, quoted for the profile: the
+    // smoke's own scratch tree stands in for a coordinator's state.
+    // A denial names the resolved directory, so the smoke mints a fresh one
+    // with the estate's own entropy source rather than naming a fixed path.
+    let unique = lgwks_std::random::bytes::<8>().map_err(std::io::Error::other)?;
+    let hex: String = unique.iter().map(|byte| format!("{byte:02x}")).collect();
+    let deny_dir = std::env::temp_dir().join(format!("lgwks-estate-smoke-deny-{hex}"));
+    std::fs::create_dir_all(&deny_dir)
+        .map_err(|error| std::io::Error::other(format!("the smoke denial dir failed: {error}")))?;
+    let denied = deny_dir.join("denied");
+    std::fs::create_dir_all(&denied)
+        .map_err(|error| std::io::Error::other(format!("the smoke denied dir failed: {error}")))?;
+    let denied_read = profile.deny_read_beneath(&denied);
+    let _removed = std::fs::remove_dir_all(&deny_dir);
+    if let Err(error) = denied_read {
+        record(
+            mismatch,
+            format!("a real directory must be deniable: {error}"),
+        );
+    } else if !profile.source().contains("(deny file-read*") {
+        record(
+            mismatch,
+            format!(
+                "the denial is missing from the profile: {:?}",
+                profile.source()
+            ),
+        );
+    }
+    // A gated lane holds its payload until the identity is recorded: the
+    // release below stands in for the durable write, and the assertions
+    // around it are the record-then-release order the coordinator keeps.
+    let mut supervisor = Supervisor::new(1);
+    let spec = ProcessSpec::new("/usr/bin/true");
+    let mut spawned: GatedIdentifiedSpawn =
+        match supervisor.spawn_process_identified_gated(&spec).await {
+            Ok(spawned) => spawned,
+            Err(error) => {
+                record(mismatch, format!("the gated spawn was refused: {error}"));
+                return Ok(());
+            }
+        };
+    if spawned.is_released() {
+        record(mismatch, "a new gate must read as unreleased".to_owned());
+    }
+    if spawned.leader().pid() <= 0 {
+        record(
+            mismatch,
+            "the identity must be readable while the payload waits".to_owned(),
+        );
+    }
+    if let Err(error) = spawned.release().await {
+        record(
+            mismatch,
+            format!("the gate must release once the record is durable: {error}"),
+        );
+        return Ok(());
+    }
+    if !spawned.is_released() {
+        record(mismatch, "a released gate must read as released".to_owned());
+    }
+    if let Err(error) = spawned.release().await {
+        record(
+            mismatch,
+            format!("a second release must be a no-op, not {error}"),
+        );
+    }
+    let task = spawned.task();
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(10))
+        .ok_or_else(|| std::io::Error::other("the gate drain deadline overflowed the clock"))?;
+    let outcome = loop {
+        supervisor.reap();
+        if let Some(outcome) = supervisor.next_report() {
+            break outcome;
+        }
+        if Instant::now() >= deadline {
+            record(mismatch, "the released payload never reported".to_owned());
+            return Ok(());
+        }
+        sleep(Duration::from_millis(1)).await;
+    };
+    if !matches!(outcome, TaskOutcome::Completed { .. }) || outcome.task() != task {
+        record(
+            mismatch,
+            format!("the released payload must complete under its own task, got {outcome:?}"),
+        );
+    }
+    say(&format!(
+        "process doors: gated lane completed under task {}",
+        task.get()
+    ))
+    .map_err(|error| std::io::Error::other(format!("the process doors line failed: {error}")))?;
+    Ok(())
 }
 
 /// Record the first deviation and keep it: the first mismatch is the root cause, and later ones
@@ -513,6 +696,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mut mismatch,
             format!("the effect ran {} times, not once", fired.get()),
         );
+    }
+
+    // The supervisor's process doors on the shipped artifact (#689, #690,
+    // #691): a gated lane runs only after its identity is recorded, and the
+    // deny builders refuse what they cannot confine. The smoke proves the
+    // assembly it ships, and these are doors of the supervisor the assembly
+    // owns: a lane that ran before its record existed, or a denial the
+    // builders accepted but no platform could hold, fails here rather than in
+    // a coordinator.
+    #[cfg(all(unix, feature = "process"))]
+    driver.block_on(process_doors(&mut mismatch))?;
+
+    // The script vocabulary on the shipped artifact (#649, #650, #651, #653,
+    // #654, #657, #694): the runtime the words desugar into, exercised through
+    // the public interface with every refusal asserted.
+    match vocabulary::run(&driver) {
+        Ok(()) => {
+            say("vocabulary: every runtime answered through the public interface")?;
+        }
+        Err(error) => {
+            record(&mut mismatch, format!("the vocabulary failed: {error}"));
+        }
     }
 
     if let Some(mismatch) = mismatch {

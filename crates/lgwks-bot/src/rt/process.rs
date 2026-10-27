@@ -27,7 +27,7 @@ mod frames;
 #[cfg(unix)]
 mod resolve;
 
-pub use confine::{Confinement, LandlockRules, PathAccess, SandboxProfile};
+pub use confine::{Confinement, DenyBeneath, LandlockRules, PathAccess, SandboxProfile};
 pub use frames::{DEFAULT_FRAME_CEILING, FrameRead, FrameReadError, Frames, read_frames};
 
 /// The successor's half of
@@ -44,7 +44,7 @@ pub use lgwks_std::process::{
 };
 
 /// How one standard stream is connected when a process starts.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum StdioPolicy {
     /// Inherit the supervisor process's stream.
@@ -64,7 +64,30 @@ pub enum StdioPolicy {
     /// [`Supervisor::spawn_process`](crate::rt::supervise::Supervisor::spawn_process)
     /// drains it too, so a captured stream never fills, but does not report it.
     Capture(NonZeroUsize),
+    /// Pipe the stream through the supervisor carrying these bytes.
+    ///
+    /// Standard-input only: the supervisor writes the bytes while the child
+    /// runs — under the same deadline that bounds the run — then closes the
+    /// pipe, so a program that reads its input (SQLite's `sqlite3`, a filter,
+    /// a prompt) can be driven without a file or a shell redirect. An empty
+    /// input closes at once, so the child reads end-of-file without a byte
+    /// first. Past one mebibyte of input the spawn is refused before the fork,
+    /// the way an unopenable output file is: a program needs a file, not a
+    /// pipe, past that.
+    ///
+    /// Naming it for standard output or standard error is refused at the same
+    /// place, because a piped output nobody drains would block the child on a
+    /// full pipe: output that is read back is [`Capture`](Self::Capture), and
+    /// output that is not is `Null`.
+    Piped(Vec<u8>),
 }
+
+/// The most bytes one supervised child may be handed on its standard input.
+///
+/// One megabyte: the same bound as a serializable spec, and generous for a
+/// statement or a prompt while keeping the supervisor's per-run allocation
+/// bounded.
+const MAX_STDIN_BYTES: usize = 1024 * 1024;
 
 /// An environment delta applied to a process at start.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -189,6 +212,9 @@ impl ProcessSpec {
     }
 
     /// Set the stdin policy.
+    ///
+    /// Hand bytes to the child with
+    /// `stdin(StdioPolicy::Piped(input))`.
     pub fn stdin(&mut self, policy: StdioPolicy) -> &mut Self {
         self.stdin = policy;
         self
@@ -259,14 +285,45 @@ impl ProcessSpec {
     /// Confine the child past its process group.
     ///
     /// A [`Confinement::SandboxProfile`] wraps the spawn in `sandbox-exec` on
-    /// macOS and a [`Confinement::Landlock`] allowlist wraps it in `setpriv` on
-    /// Linux; each refuses the spawn anywhere else, so a confinement set by
+    /// macOS, a [`Confinement::Landlock`] allowlist wraps it in `setpriv` on
+    /// Linux, and a [`Confinement::DenyBeneath`] denial overmounts the denied
+    /// subtrees on Linux or denies reads beneath them in the profile on
+    /// macOS; each refuses the spawn anywhere else, so a confinement set by
     /// mistake on the wrong platform starts nothing rather than running the
     /// child unconfined. Confinement applies between the fork and the exec,
     /// so every descendant inherits it.
     pub fn confinement(&mut self, confinement: Confinement) -> &mut Self {
         self.confinement = confinement;
         self
+    }
+
+    /// Clone this spec with its program held behind a start gate.
+    ///
+    /// The gated child runs `/bin/sh`, which stops itself before it execs
+    /// this spec's program afterwards, keeping the same pid: an identity read
+    /// while the shell is stopped names the process the payload runs as, and
+    /// the stop is synchronous — the payload cannot run before the release no
+    /// matter when the child is scheduled. Crate-internal: the only producer
+    /// is the gated identified spawn, which releases the child once the
+    /// identity is recorded.
+    ///
+    /// The gate shell itself is confined exactly as this spec asks, because
+    /// the confinement wraps the shell and inherits across its exec. If the
+    /// stop itself failed the shell would exit before the exec, so a broken
+    /// gate never runs the payload unrecorded.
+    #[cfg(all(unix, feature = "process"))]
+    pub(crate) fn gated(&self) -> Self {
+        const SCRIPT: &str = "kill -STOP $$ || exit 99; exec \"$@\"";
+        let mut gated = self.clone();
+        let mut args = Vec::with_capacity(self.args.len().saturating_add(4));
+        args.push("-c".into());
+        args.push(SCRIPT.into());
+        args.push("lgwks-gate".into());
+        args.push(self.program.clone());
+        args.extend(self.args.iter().cloned());
+        gated.program = "/bin/sh".into();
+        gated.args = args;
+        gated
     }
 
     /// The program to execute, for inspection only.
@@ -296,12 +353,24 @@ impl ProcessSpec {
     /// How the child's standard input was wired at spawn.
     ///
     /// The policy is what was *requested*; it does not report what the child
-    /// then read, which nothing here can know. `Capture` carries the retained
-    /// byte ceiling, so this also answers how much input this child could have
-    /// had captured rather than piped.
+    /// then read, which nothing here can know. [`StdioPolicy::Piped`] carries
+    /// the bytes the supervisor wrote before it closed the pipe.
     #[must_use]
-    pub const fn stdin_policy(&self) -> StdioPolicy {
-        self.stdin
+    pub fn stdin_policy(&self) -> StdioPolicy {
+        self.stdin.clone()
+    }
+
+    /// The input to feed the child, or `None` when standard input is not piped.
+    ///
+    /// `Some` carries a clone of the piped bytes — possibly empty, which the
+    /// driver writes as an immediate close — so the driver owns what it writes
+    /// and the spec stays borrowed. Crate-internal: the only reader is the
+    /// supervisor's run path.
+    pub(crate) fn stdin_feed(&self) -> Option<Vec<u8>> {
+        match self.stdin {
+            StdioPolicy::Piped(ref input) => Some(input.clone()),
+            StdioPolicy::Inherit | StdioPolicy::Null | StdioPolicy::Capture(_) => None,
+        }
     }
 
     /// How the child's standard output was wired at spawn.
@@ -310,8 +379,8 @@ impl ProcessSpec {
     /// ceiling this value names; `Inherit` and `Null` mean the supervisor never
     /// saw it and [`Self::stdout`] is empty rather than absent.
     #[must_use]
-    pub const fn stdout_policy(&self) -> StdioPolicy {
-        self.stdout
+    pub fn stdout_policy(&self) -> StdioPolicy {
+        self.stdout.clone()
     }
 
     /// How the child's standard error was wired at spawn.
@@ -320,8 +389,8 @@ impl ProcessSpec {
     /// a supervisor commonly captures diagnostics while letting ordinary output
     /// through, and a caller asking "did I get its stderr" reads this.
     #[must_use]
-    pub const fn stderr_policy(&self) -> StdioPolicy {
-        self.stderr
+    pub fn stderr_policy(&self) -> StdioPolicy {
+        self.stderr.clone()
     }
 
     /// The optional runtime deadline, for inspection only.
@@ -341,19 +410,19 @@ impl ProcessSpec {
 
     /// The retained-byte ceiling for stdout, or `None` when it is not captured.
     #[must_use]
-    pub(crate) const fn stdout_capture(&self) -> Option<NonZeroUsize> {
+    pub(crate) fn stdout_capture(&self) -> Option<NonZeroUsize> {
         match self.stdout {
             StdioPolicy::Capture(limit) => Some(limit),
-            StdioPolicy::Inherit | StdioPolicy::Null => None,
+            StdioPolicy::Inherit | StdioPolicy::Null | StdioPolicy::Piped(_) => None,
         }
     }
 
     /// The retained-byte ceiling for stderr, or `None` when it is not captured.
     #[must_use]
-    pub(crate) const fn stderr_capture(&self) -> Option<NonZeroUsize> {
+    pub(crate) fn stderr_capture(&self) -> Option<NonZeroUsize> {
         match self.stderr {
             StdioPolicy::Capture(limit) => Some(limit),
-            StdioPolicy::Inherit | StdioPolicy::Null => None,
+            StdioPolicy::Inherit | StdioPolicy::Null | StdioPolicy::Piped(_) => None,
         }
     }
 
@@ -424,7 +493,11 @@ impl ProcessSpec {
     ///
     /// The [`io::Error`] from opening a file named by
     /// [`stdout_to_file`](Self::stdout_to_file) or
-    /// [`stderr_to_file`](Self::stderr_to_file).
+    /// [`stderr_to_file`](Self::stderr_to_file), or
+    /// [`io::ErrorKind::InvalidInput`] when standard output or standard error
+    /// names [`StdioPolicy::Piped`]: a piped output nobody drains would block
+    /// the child on a full pipe, so piped output is refused before the fork
+    /// rather than run half-connected.
     pub(crate) fn configure(&self, command: &mut Command) -> io::Result<()> {
         if confine::wraps(&self.confinement) {
             // The wrapper's first operand is the target: `sandbox-exec -p
@@ -450,14 +523,40 @@ impl ProcessSpec {
         if let Some(cwd) = self.cwd.as_ref() {
             command.current_dir(cwd);
         }
-        command.stdin(self.stdin.into_stdio());
+        if matches!(self.stdout, StdioPolicy::Piped(_))
+            || matches!(self.stderr, StdioPolicy::Piped(_))
+        {
+            lgwks_std::trace::warn!(
+                stdout = ?self.stdout,
+                stderr = ?self.stderr,
+                "process spec: piped output is refused before the fork; capture it, send it to a file, or leave it null"
+            );
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "lgwks_bot: piped output is refused: capture it, send it to a file, or leave it null",
+            ));
+        }
+        if let StdioPolicy::Piped(ref input) = self.stdin
+            && input.len() > MAX_STDIN_BYTES
+        {
+            lgwks_std::trace::warn!(
+                len = input.len(),
+                limit = MAX_STDIN_BYTES,
+                "process spec: standard input past the ceiling is refused before the fork; hand the program a file instead"
+            );
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "lgwks_bot: piped input past the ceiling is refused: hand the program a file instead",
+            ));
+        }
+        command.stdin(self.stdin.to_stdio());
         command.stdout(match self.stdout_file.as_deref() {
             Some(path) => file_stdio(path)?,
-            None => self.stdout.into_stdio(),
+            None => self.stdout.to_stdio(),
         });
         command.stderr(match self.stderr_file.as_deref() {
             Some(path) => file_stdio(path)?,
-            None => self.stderr.into_stdio(),
+            None => self.stderr.to_stdio(),
         });
         Ok(())
     }
@@ -475,13 +574,17 @@ fn file_stdio(path: &Path) -> io::Result<std::process::Stdio> {
 
 impl StdioPolicy {
     /// Convert the data policy into the private engine's standard stream value.
-    fn into_stdio(self) -> std::process::Stdio {
-        match self {
+    fn to_stdio(&self) -> std::process::Stdio {
+        match *self {
             Self::Inherit => std::process::Stdio::inherit(),
             Self::Null => std::process::Stdio::null(),
             // The supervisor reads the pipe back while the child runs, so a
             // captured stream never fills and blocks the child.
             Self::Capture(_) => std::process::Stdio::piped(),
+            // The supervisor writes the piped bytes while the child runs,
+            // then closes the pipe, so a child reading its input never waits
+            // on a writer that never comes.
+            Self::Piped(_) => std::process::Stdio::piped(),
         }
     }
 }

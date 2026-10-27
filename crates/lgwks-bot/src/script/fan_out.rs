@@ -81,7 +81,8 @@ impl<E: std::error::Error + 'static> std::error::Error for FanOutError<E> {
 /// carrying the item's own error.
 ///
 /// With no [`at_most`](Self::at_most) the bound is the runtime's: 64 bodies per
-/// available core, the same as [`each`] with no limit.
+/// available core, drawn from the process-wide host pool every unbounded
+/// `each` shares, the same as [`each`] with no limit.
 #[must_use = "a fan-out does nothing until `run` is awaited"]
 #[derive(Debug)]
 pub struct FanOut<I> {
@@ -135,7 +136,10 @@ impl<I: IntoIterator> FanOut<I> {
         F: Fn(I::Item) -> Fut,
         Fut: Future<Output = Result<T, E>>,
     {
-        let scope = Scope::root(Tenant::new(TENANT).map_err(FanOutError::Flow)?);
+        // The crate's own reserved tenant, minted through the crate-private
+        // path: `Tenant::new` refuses it so no caller can adopt the
+        // unsupervised fan-out's namespace by spelling it.
+        let scope = Scope::root(Tenant::assumed(TENANT));
         self.drive(&scope, "run", body).await
     }
 

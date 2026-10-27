@@ -111,9 +111,14 @@
 //! | `bevy-app`, `bevy-time`, `bevy-state` | one Bevy runtime crate each, on top of `bevy-ecs` |
 //! | `gpui` | Zed's GPU desktop UI framework (Apple targets only) |
 //! | `appcui` | the AppCUI terminal UI framework |
+//! | `axum` | day-0 HTTP routing for the revenue slice (#721) |
+//! | `tower-http` | day-0 HTTP middleware: cors, trace, compression (#721) |
+//! | `llm-guard` | day-0 AI input guard, fuzzy scanner only, no model (#721) |
 //! | `ml-candle` | Candle tensors, layers and the transformer registry |
 //! | `ml-candle-metal` | `ml-candle` plus Candle's Metal backend (macOS) |
 //! | `ml-tokenizers` | the Hugging Face subword tokenizer |
+//! | `time-jiff` | interim zoned time until ELIMINATE lands in `lgwks_std::time` |
+//! | `sqlite` | the one durable SQLite, opened with the estate's defaults |
 
 // Lint contract (missing_docs deny, unsafe_code forbid, broken intra-doc
 // links deny) comes from the workspace root.
@@ -124,14 +129,60 @@
 pub mod catalog;
 /// The approval register: parsing and lookup for `contract/APPROVED.toml`.
 pub mod contract;
+/// The deferral catalog: crates the estate owns or does not need yet, each
+/// with a measured trigger (`contract/DEFERRAL.toml`, #725, #726, #727).
+#[doc(hidden)]
+pub mod deferral;
+/// The doc-citation check's one implementation (#695): `lgwks_deps` owns the
+/// rule, the `check-doc-citations` binary is a thin shim over the shared
+/// entry, and `logical_ci`'s `docs-refs` gate is its designated library
+/// consumer through [`doc_citations::execute`], so a changed document's
+/// citations still resolve under one rule with one owner.
+#[doc(hidden)]
+pub mod doc_citations;
 /// The optional authored invariant register and its repository-aware validator.
 #[doc(hidden)]
 pub mod invariants;
+/// The dependency report: lifecycle, deferral, patch and TLS provider ledger
+/// rendering for the `ledger` binary (#722).
+#[doc(hidden)]
+pub mod ledger;
+/// The lifecycle mortgage ledger: replacement, removal trigger and review date
+/// for every approved edge (`contract/LIFECYCLE.toml`, #722).
+#[doc(hidden)]
+pub mod lifecycle;
 /// The register: parsing and approval lookup for `contract/APPROVED.toml`.
 #[doc(hidden)]
 pub mod lock;
 /// Cargo metadata edges: who authored which external dependency.
 pub mod metadata;
+/// The supply-chain ledger: upstream pins and sealed provider exceptions
+/// (`contract/PATCHES.toml`, #723, #728).
+#[doc(hidden)]
+pub mod patches;
+/// The requirements check's one implementation (#695): `lgwks_deps` owns the
+/// rule, the `check-requirements` binary is a thin shim over the shared
+/// entry, and `logical_ci`'s `governance` gate is its designated library
+/// consumer through [`requirements::execute`], so a requirement is
+/// superseded, never edited, under one rule with one owner.
+#[doc(hidden)]
+pub mod requirements;
+/// The spec-owner check's one implementation (#695): `lgwks_deps` owns the
+/// rule, the `check-spec-owners` binary is a thin shim over the shared entry,
+/// and `logical_ci`'s `governance` gate is its designated library consumer
+/// through [`spec_owners::execute`], so every checked requirement has a
+/// falsifier row under one rule with one owner.
+#[doc(hidden)]
+pub mod spec_owners;
+/// The estate's one durable store: SQLite opened one way, migrated by version.
+///
+/// Behind the `sqlite` storefront feature, so a consumer that needs state
+/// across runs selects it instead of declaring its own SQLite crate (#696).
+/// The engine itself travels through the storefront; this module is the
+/// opinion about how it is opened.
+#[cfg(feature = "sqlite")]
+#[doc(hidden)]
+pub mod sqlite;
 /// Vendor-tree coverage: binding the lockfile to the shared `vendor/` tree.
 #[doc(hidden)]
 pub mod vendor;
@@ -265,6 +316,36 @@ pub use tokenizers;
 #[doc(hidden)]
 pub use jiff;
 
+/// Day-0 HTTP routing for the revenue slice (#721): Tower-compatible routing
+/// with the serving stack the slice proves. Reached only through the
+/// `axum` storefront feature, never as a direct edge.
+#[cfg(feature = "axum")]
+#[doc(hidden)]
+pub use axum;
+/// The one authored SQLite edge, re-exported for the storefront.
+///
+/// `lgwks_deps` owns this edge so no other crate declares `rusqlite` directly
+/// (`INV-DEP-EDGE-OWNED`). A service that needs durable state enables the
+/// `sqlite` storefront feature and opens it through [`sqlite`], which carries
+/// the estate's opened-connection defaults; reaching the engine without them
+/// is how every service invents its own pragma set (#696).
+#[cfg(feature = "sqlite")]
+#[doc(hidden)]
+pub use rusqlite;
+
+/// Day-0 HTTP middleware for the revenue slice (#721): cors, trace and
+/// compression layers. Reached only through the `tower-http` feature.
+#[cfg(feature = "tower-http")]
+#[doc(hidden)]
+pub use tower_http;
+
+/// Day-0 AI input guard for the revenue slice (#721): pure-Rust scanners with
+/// the fuzzy scanner only and no model download. Reached only through the
+/// `llm-guard` feature.
+#[cfg(feature = "llm-guard")]
+#[doc(hidden)]
+pub use llm_guard;
+
 /// The supported storefront: enable a feature and reach its engine here.
 ///
 /// Every path below is one audited edge this crate owns, so a consumer never
@@ -273,6 +354,8 @@ pub use jiff;
 pub mod storefront {
     #[cfg(feature = "appcui")]
     pub use crate::appcui;
+    #[cfg(feature = "axum")]
+    pub use crate::axum;
     #[cfg(feature = "bevy-app")]
     pub use crate::bevy_app;
     #[cfg(feature = "bevy-ecs")]
@@ -285,10 +368,18 @@ pub mod storefront {
     pub use crate::gpui;
     #[cfg(feature = "time-jiff")]
     pub use crate::jiff;
+    #[cfg(feature = "llm-guard")]
+    pub use crate::llm_guard;
+    #[cfg(feature = "sqlite")]
+    pub use crate::rusqlite;
+    #[cfg(feature = "sqlite")]
+    pub use crate::sqlite;
     #[cfg(feature = "ml-tokenizers")]
     pub use crate::tokenizers;
     #[cfg(feature = "tokio")]
     pub use crate::tokio;
+    #[cfg(feature = "tower-http")]
+    pub use crate::tower_http;
     #[cfg(feature = "ml-candle")]
     pub use crate::{candle_core, candle_nn, candle_transformers};
 }
@@ -300,6 +391,24 @@ use metadata::DirectEdge;
 
 /// Register location relative to the repository root.
 pub const CONTRACT_PATH: &str = "contract/APPROVED.toml";
+
+/// Deferral catalog location relative to the repository root.
+///
+/// Opt-in: a repository without it is audited exactly as before. This
+/// repository carries one, so an approved edge the catalog defers is refused.
+pub(crate) const DEFERRAL_PATH: &str = "contract/DEFERRAL.toml";
+
+/// Supply-chain ledger location relative to the repository root.
+///
+/// Opt-in like the deferral catalog: upstream pins and sealed TLS provider
+/// exceptions with expiry dates. This repository carries one.
+pub(crate) const PATCHES_PATH: &str = "contract/PATCHES.toml";
+
+/// Lifecycle mortgage location relative to the repository root.
+///
+/// Opt-in like the other ledgers: replacement, removal trigger and review
+/// date for every approved edge. This repository carries one.
+pub(crate) const LIFECYCLE_PATH: &str = "contract/LIFECYCLE.toml";
 
 // ── Filesystem entry points ─────────────────────────────────────────────────
 
@@ -462,13 +571,46 @@ pub fn check_verdict(
     // would otherwise shrink the graph this gate reasons about without saying
     // so -- the failure `lock::parse` exists to refuse, reached only by the two
     // commands that happened to call it.
-    lock::parse(&read(&lock_path)?).map_err(GateError::Lock)?;
+    let locked = lock::parse(&read(&lock_path)?).map_err(GateError::Lock)?;
     let overrides = overrides::refusals(root)?;
+    // The opt-in supply-chain ledgers: a repository that carries
+    // `contract/DEFERRAL.toml` refuses an approved edge the catalog defers
+    // (#725, #726, #727), and one that carries `contract/PATCHES.toml`
+    // refuses an expired pin and names the sealed TLS provider exceptions
+    // (#723, #728). A repository without them is audited exactly as before;
+    // a ledger file that exists but cannot be read or parsed is a refusal.
+    let today = patches::today_utc();
+    let mut ledger_refusals: Vec<Refusal> = Vec::new();
+    let deferred = match deferral::load(root) {
+        Ok(deferred) => deferred,
+        Err(refusal) => {
+            ledger_refusals.push(refusal);
+            None
+        }
+    };
+    let supply = match patches::load(root) {
+        Ok(supply) => supply,
+        Err(refusal) => {
+            ledger_refusals.push(refusal);
+            None
+        }
+    };
+    let lifecycle = match lifecycle::load(root) {
+        Ok(lifecycle) => lifecycle,
+        Err(refusal) => {
+            ledger_refusals.push(refusal);
+            None
+        }
+    };
     let edges = metadata::read_with_members(root).map_err(GateError::Metadata)?;
     Ok(edges.map(|(edges, members)| {
         let mut refusals = audit_direct(&edges, &register);
         refusals.extend(audit::surface_refusals(&members, &register));
         refusals.extend(overrides);
+        refusals.extend(ledger_refusals);
+        refusals.extend(deferral::refusals(&register, deferred.as_ref()));
+        refusals.extend(patches::refusals(supply.as_ref(), &locked, &today));
+        refusals.extend(lifecycle::refusals(&register, lifecycle.as_ref()));
         Verdict {
             register,
             refusals,

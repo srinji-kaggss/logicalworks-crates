@@ -1,7 +1,7 @@
 //! Starting a child and owning it, and the Linux adoption sweeps.
 
 use crate::rt::process::ProcessSpec;
-use lgwks_deps::tokio::process::{ChildStderr, ChildStdout};
+use lgwks_deps::tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 #[cfg(target_os = "linux")]
 use lgwks_std::process::CgroupScope;
 use std::io;
@@ -57,6 +57,16 @@ pub(super) fn start(spec: &ProcessSpec) -> io::Result<(OwnedChild, i32)> {
     #[cfg(all(target_os = "linux", feature = "process"))]
     let _collected = sweep_adopted();
     Ok((child, group))
+}
+
+/// Start `spec` with its program held behind a start gate.
+///
+/// The same constructor as [`start`], over the gated spec: the child forks
+/// stopped, so its identity is stable before the payload runs. The caller
+/// releases the child once the identity is recorded durably.
+#[cfg(all(unix, feature = "process"))]
+pub(super) fn start_gated(spec: &ProcessSpec) -> io::Result<(OwnedChild, i32)> {
+    start(&spec.gated())
 }
 
 /// Serialises a start's spawn-to-track against every adoption sweep.
@@ -344,7 +354,8 @@ pub(super) fn reap_orphans() {
 }
 
 /// A started child this module owns: the std handle, its two captured pipes as
-/// async readers, and whether it has been reaped.
+/// async readers, its piped standard input as an async writer, and whether it
+/// has been reaped.
 ///
 /// Dropping an unreaped one kills the direct child and parks it in [`ORPHANS`],
 /// so an aborted driver never leaves a running child or an unreaped zombie
@@ -359,6 +370,8 @@ pub(super) struct OwnedChild {
     pub(super) stdout: Option<ChildStdout>,
     /// Its stderr, when the spec captured it.
     pub(super) stderr: Option<ChildStderr>,
+    /// Its standard input, when the spec piped it.
+    pub(super) stdin: Option<ChildStdin>,
 }
 
 #[cfg(all(unix, feature = "process"))]
@@ -376,14 +389,17 @@ impl OwnedChild {
         reap_orphans();
         let stdout = inner.stdout.take();
         let stderr = inner.stderr.take();
+        let stdin = inner.stdin.take();
         let mut child = Self {
             pid: inner.id(),
             inner: Some(inner),
             stdout: None,
             stderr: None,
+            stdin: None,
         };
         child.stdout = stdout.map(ChildStdout::from_std).transpose()?;
         child.stderr = stderr.map(ChildStderr::from_std).transpose()?;
+        child.stdin = stdin.map(ChildStdin::from_std).transpose()?;
         Ok(child)
     }
 

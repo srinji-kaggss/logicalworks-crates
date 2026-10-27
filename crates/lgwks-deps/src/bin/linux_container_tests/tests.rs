@@ -567,13 +567,22 @@ fn the_committed_profile_builds_uncapped_and_then_measures_capped() -> TestResul
         ),
         "the records directory, then what the container says the cap is"
     );
-    assert_eq!(lines.len(), 11, "three set-up commands and eight doors");
+    assert_eq!(lines.len(), 12, "three set-up commands and nine doors");
     assert_eq!(
         lines.get(3).map(String::as_str),
         Some(
             "/target/release/lgwks-bench-async --rounds=15 --alloc-report --json=bench/async/vps/results.json"
         ),
         "the first door runs the binary the build left in the container's target"
+    );
+    let cpu = lines.get(9).ok_or("no tenth command")?;
+    assert!(
+        cpu.contains("--saturation")
+            && cpu.contains("--body-kind=cpu")
+            && cpu.contains("--cpu-rounds=300000")
+            && cpu.contains("--workers=2")
+            && cpu.contains("--json=bench/async/vps/saturation-cpu.json"),
+        "the CPU door saturates with pinned CPU bodies on two workers into its own record: {cpu}"
     );
     let guarded = lines
         .iter()
@@ -610,7 +619,7 @@ fn every_record_the_profile_writes_is_committed_and_every_committed_record_is_wr
     assert_eq!(
         written_records(&committed_profile()?)?,
         committed,
-        "the doors and the records on disk name the same six files"
+        "the doors and the records on disk name the same seven files"
     );
     Ok(())
 }

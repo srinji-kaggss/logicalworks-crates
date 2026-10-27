@@ -1,4 +1,4 @@
-//! Driving one supervised child: observing its exit, draining its pipes, reaping it.
+//! Driving one supervised child: feeding its input, observing its exit, draining its pipes, reaping it.
 
 use super::LineObserver;
 use super::ended::{ProcessEnd, ProcessObservation, RunBounds};
@@ -8,9 +8,10 @@ use super::start::OwnedChild;
 use super::supervisor::ProcessCleanup;
 use crate::rt::cancel::CancellationToken;
 use crate::rt::clock::Clock;
-use crate::rt::io::{AsyncRead, AsyncReadExt};
+use crate::rt::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use crate::rt::process::CapturedStream;
 use crate::rt::task::yield_now;
+use lgwks_deps::tokio::process::ChildStdin;
 use std::io;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -73,24 +74,36 @@ pub(super) async fn drive_process(
     token: &CancellationToken,
     group: ProcessGroup<'static>,
     bounds: RunBounds,
+    stdin: Option<Vec<u8>>,
 ) -> ProcessEnd {
-    drive_process_observed(clock, child, token, group, bounds, None).await
+    drive_process_observed(clock, child, token, group, bounds, None, stdin).await
 }
 
-/// Drive one started child to a terminal observation: drain its captured
-/// streams, waiting for its exit (or the deadline, or cancellation), signal its
-/// process group, and reap it.
+/// Drive one started child to a terminal observation: feed its piped input,
+/// drain its captured streams, waiting for its exit (or the deadline, or
+/// cancellation), signal its process group, and reap it.
 ///
 /// This is the single body behind [`Supervisor::run_process`] and
-/// [`Supervisor::run_process_observed`]. The three phases run concurrently as
-/// [`join3`]: the two pipe reads must make progress while the child runs, or a
-/// child that writes more than a pipe buffer would block forever waiting for a
-/// reader that is waiting for it to exit.
+/// [`Supervisor::run_process_observed`]. The four phases run concurrently as
+/// [`join4`]: the input write and the two pipe reads must make progress while
+/// the child runs, or a child that writes more than a pipe buffer would block
+/// forever waiting for a reader that is waiting for it to exit — and a child
+/// that reads its input would block forever waiting for a writer that never
+/// comes.
 ///
 /// `on_line` is forwarded to the **stdout** read only. It is not a second read
 /// of the child's output: it is called from inside the read that retains that
 /// output, on the bytes that read just observed, so an observation and a
 /// capture can never disagree about what the child wrote.
+///
+/// `stdin` is the stored input, resolved from the spec beside the bounds:
+/// `Some` writes the bytes and then closes the pipe, so the child reads
+/// end-of-file after the last byte, and `None` leaves the child's input
+/// exactly as its policy says. The write runs beside the pipe drains, so a
+/// child that answers only after reading its input never waits on a writer
+/// parked behind its own output. A write the child stopped reading ends the
+/// feed rather than failing the run — a child that exits early has answered,
+/// and its exit is the report, not the unwritten tail.
 ///
 /// The deadline and the two capture ceilings arrive as one [`RunBounds`],
 /// resolved from a single spec by [`Supervisor::prepare_process`].
@@ -102,6 +115,7 @@ pub(super) async fn drive_process_observed(
     mut group: ProcessGroup<'static>,
     bounds: RunBounds,
     on_line: Option<LineObserver<'_>>,
+    stdin: Option<Vec<u8>>,
 ) -> ProcessEnd {
     let RunBounds {
         deadline,
@@ -111,6 +125,7 @@ pub(super) async fn drive_process_observed(
     let pid = child.group().ok();
     let pipes = OpenPipes::default();
     let abandon = CancellationToken::new();
+    let feed = feed_stdin(child.stdin.take(), stdin, &abandon);
     let capture_out = capture(
         child.stdout.take(),
         out_limit,
@@ -125,9 +140,9 @@ pub(super) async fn drive_process_observed(
         &abandon,
         &pipes.stderr,
     );
-    // Reading the pipes and waiting for the child are independent futures over
-    // disjoint state; only the group is borrowed, and that borrow ends when
-    // this future completes.
+    // Reading the pipes, feeding the input and waiting for the child are
+    // independent futures over disjoint state; only the group is borrowed, and
+    // that borrow ends when this future completes.
     let wait = async {
         let observation = match pid {
             Some(pid) => observe_pid_without_reaping(clock, pid, deadline, token).await,
@@ -140,7 +155,8 @@ pub(super) async fn drive_process_observed(
         drain_pipes(&mut group, &pipes, &abandon).await;
         (observation, cleanup)
     };
-    let (stdout, stderr, (observation, mut receipt)) = join3(capture_out, capture_err, wait).await;
+    let ((), stdout, stderr, (observation, mut receipt)) =
+        join4(feed, capture_out, capture_err, wait).await;
     if !pipes.closed() {
         group.mark_descriptor_held();
     }
@@ -279,6 +295,60 @@ async fn drain_pipes(group: &mut ProcessGroup<'_>, pipes: &OpenPipes, abandon: &
     if !pipes.closed() {
         abandon.cancel();
     }
+}
+
+/// Write the stored input to a piped standard input, then close the pipe.
+///
+/// The write runs beside the pipe drains, so a child that answers only after
+/// reading its input never waits on a writer parked behind its own output. An
+/// empty input closes at once: the child reads end-of-file without a byte
+/// first. A write the child stopped reading ends the feed rather than failing
+/// the run — a child that exits early has answered, and its exit is the
+/// report, not the unwritten tail. `None` feeds nothing: the child's input
+/// stays exactly as its policy says, except that a taken pipe with no feed is
+/// dropped unread, which reads as end-of-file rather than holding the reader
+/// open until the reap.
+///
+/// `abandon` ends the feed with the pipe closed, which is what stops a child
+/// still reading when the group is gone from deciding how long the run lasts.
+///
+/// A piped input with no stored feed (`None`) is dropped unread, which reads
+/// as end-of-file to the child: a pipe the supervisor never writes must not
+/// hold a reader open until the reap.
+#[cfg(all(unix, feature = "process"))]
+pub(super) async fn feed_stdin(
+    stdin: Option<ChildStdin>,
+    input: Option<Vec<u8>>,
+    abandon: &CancellationToken,
+) {
+    let (Some(mut pipe), Some(bytes)) = (stdin, input) else {
+        return;
+    };
+    if bytes.is_empty() {
+        return;
+    }
+    let write = async {
+        let mut written = 0usize;
+        while written < bytes.len() {
+            match pipe.write(&bytes[written..]).await {
+                Ok(0) => break,
+                Ok(count) => written = written.saturating_add(count),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    lgwks_std::trace::debug!(
+                        %error,
+                        written,
+                        total = bytes.len(),
+                        "supervisor: piped-input write ended early; the child's exit is the report, not the unwritten tail"
+                    );
+                    break;
+                }
+            }
+        }
+        drop(pipe);
+    };
+    // The feed either wrote everything or was abandoned; either way the pipe is closed by the drop below.
+    let _written = abandon.run_until_cancelled(write).await;
 }
 
 /// Read a captured pipe to EOF, retaining at most `limit` bytes and counting
@@ -431,31 +501,36 @@ pub(super) fn strip_carriage_return(line: &[u8]) -> &[u8] {
     }
 }
 
-/// Poll three futures to completion on the calling task, returning their
+/// Poll four futures to completion on the calling task, returning their
 /// outputs together.
 ///
 /// The engine's `join!` is behind the `macros` feature, which the `process`
 /// feature does not require, so this is the small combinator that build needs.
-/// Nothing is spawned and nothing is `Send`-bound: a child's two pipes must be
-/// drained while it is observed, and the futures that do so borrow the caller's
-/// child and group, which a spawned task could not.
+/// Nothing is spawned and nothing is `Send`-bound: a child's input write and
+/// two pipe reads must make progress while it is observed, and the futures
+/// that do so borrow the caller's child and group, which a spawned task could
+/// not.
 #[cfg(all(unix, feature = "process"))]
-pub(super) async fn join3<A, B, C>(
+pub(super) async fn join4<A, B, C, D>(
     first: A,
     second: B,
     third: C,
-) -> (A::Output, B::Output, C::Output)
+    fourth: D,
+) -> (A::Output, B::Output, C::Output, D::Output)
 where
     A: Future,
     B: Future,
     C: Future,
+    D: Future,
 {
     let mut first = std::pin::pin!(first);
     let mut second = std::pin::pin!(second);
     let mut third = std::pin::pin!(third);
+    let mut fourth = std::pin::pin!(fourth);
     let mut first_out: Option<A::Output> = None;
     let mut second_out: Option<B::Output> = None;
     let mut third_out: Option<C::Output> = None;
+    let mut fourth_out: Option<D::Output> = None;
     std::future::poll_fn(|context| {
         if first_out.is_none()
             && let std::task::Poll::Ready(value) = first.as_mut().poll(context)
@@ -472,13 +547,23 @@ where
         {
             third_out = Some(value);
         }
-        if first_out.is_some() && second_out.is_some() && third_out.is_some() {
+        if fourth_out.is_none()
+            && let std::task::Poll::Ready(value) = fourth.as_mut().poll(context)
+        {
+            fourth_out = Some(value);
+        }
+        if first_out.is_some()
+            && second_out.is_some()
+            && third_out.is_some()
+            && fourth_out.is_some()
+        {
             let first_value = first_out.take();
             let second_value = second_out.take();
             let third_value = third_out.take();
-            return match (first_value, second_value, third_value) {
-                (Some(first_value), Some(second_value), Some(third_value)) => {
-                    std::task::Poll::Ready((first_value, second_value, third_value))
+            let fourth_value = fourth_out.take();
+            return match (first_value, second_value, third_value, fourth_value) {
+                (Some(first_value), Some(second_value), Some(third_value), Some(fourth_value)) => {
+                    std::task::Poll::Ready((first_value, second_value, third_value, fourth_value))
                 }
                 _ => std::task::Poll::Pending,
             };

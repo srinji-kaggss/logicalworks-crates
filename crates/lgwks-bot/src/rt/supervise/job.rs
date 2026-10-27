@@ -112,7 +112,8 @@ fn abandon(mut child: std::process::Child) {
 ///
 /// # Errors
 ///
-/// `Unsupported` for a spec that captures a stream, `InvalidData` for a pid that
+/// `Unsupported` for a spec that captures a stream or pipes its standard
+/// input, `InvalidData` for a pid that
 /// does not fit the id type the process primitives speak, and the operating
 /// system's error when the job cannot be made, the program cannot start, or the
 /// child cannot be assigned. A child that started and could not be assigned is
@@ -122,6 +123,17 @@ fn start(spec: &ProcessSpec, bounds: &RunBounds) -> io::Result<JobChild> {
         let refusal = Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "lgwks_bot: a Windows process cannot capture a stream; use stdout_to_file or stderr_to_file",
+        ));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "start: returning an error to the caller");
+        return refusal;
+    }
+    if matches!(
+        spec.stdin_policy(),
+        crate::rt::process::StdioPolicy::Piped(_)
+    ) {
+        let refusal = Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "lgwks_bot: a Windows process cannot be handed standard input; use a file redirect",
         ));
         lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "start: returning an error to the caller");
         return refusal;

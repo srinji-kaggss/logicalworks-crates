@@ -164,6 +164,19 @@ impl Watch {
             Ok(u64::from(item).saturating_mul(2))
         }
     }
+
+    /// One root's body under the shared pool: counted in, yielded once,
+    /// counted out, never failing. Borrowed, like [`Watch::body`], so the
+    /// fan-out's `Fn` closure can call it once per item without moving the
+    /// watch into any one body.
+    async fn shared_body(&self, item: u32) -> Result<u64, Refused> {
+        self.started.fetch_add(1, Ordering::Relaxed);
+        let now = self.live.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+        self.peak.fetch_max(now, Ordering::Relaxed);
+        Yield(false).await;
+        self.live.fetch_sub(1, Ordering::Relaxed);
+        Ok(u64::from(item).saturating_mul(2))
+    }
 }
 
 /// Run `scenario` and return its outcome with what the bodies observed.
@@ -450,5 +463,71 @@ fn sim_distinct_seeds_draw_different_outcomes() -> TestResult {
         outcome_trace(SEEDS[1])?,
         "two seeds drew alike"
     );
+    Ok(())
+}
+
+#[test]
+/// Concurrent roots each complete in order: four roots demanding thousands of
+/// bodies at once all finish, every value back in input order on every root,
+/// every item run exactly once.
+///
+/// Through the public interface only, so this is what a caller sees: liveness
+/// and order under sharing. The bound itself — that the roots peak at no more
+/// than the one shared pool — is asserted where the pool is visible, in
+/// `sim_concurrent_roots_divide_the_one_pool` (`script::policy::pool_tests`).
+///
+/// Bodies yield once before answering, so they are genuinely in flight
+/// together rather than finishing inside the poll that started them.
+fn sim_concurrent_roots_complete_in_order() -> TestResult {
+    const ROOTS: usize = 4;
+    const ITEMS: u32 = 2_048;
+    let items: Vec<u32> = (0..ITEMS).collect();
+    let watch = Watch::default();
+    let failures: Vec<String> = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(ROOTS);
+        for _ in 0..ROOTS {
+            handles.push(scope.spawn(|| {
+                let outcome = lgwks_bot::block_on(
+                    FanOut::new(items.clone().into_iter().enumerate())
+                        .run(|(_index, item)| watch.shared_body(item)),
+                );
+                match outcome {
+                    Ok(values) => {
+                        let expected: Vec<u64> = items
+                            .iter()
+                            .map(|&item| u64::from(item).saturating_mul(2))
+                            .collect();
+                        if values != expected {
+                            Some("a root's values came back out of order".to_owned())
+                        } else {
+                            None
+                        }
+                    }
+                    Err(error) => Some(format!("a root failed: {error}")),
+                }
+            }));
+        }
+        handles
+            .into_iter()
+            .filter_map(|handle| match handle.join() {
+                Ok(failure) => failure,
+                Err(_) => Some("a root's thread failed".to_owned()),
+            })
+            .collect()
+    });
+    assert!(
+        failures.is_empty(),
+        "concurrent roots failed: {}",
+        failures.join("; ")
+    );
+    // Four roots each admitted `items.len()` bodies; every one ran exactly
+    // once, on whichever root admitted it.
+    let total = usize::try_from(ITEMS).map_err(|error| error.to_string())?;
+    assert_eq!(
+        watch.started.load(Ordering::Relaxed),
+        total.saturating_mul(ROOTS),
+        "every item ran exactly once on every root"
+    );
+    assert_eq!(watch.live.load(Ordering::Relaxed), 0, "none left in flight");
     Ok(())
 }

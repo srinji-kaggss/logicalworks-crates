@@ -1,0 +1,339 @@
+# Deferred dependency catalog — crates the estate does not admit on day 0.
+#
+# Each row names the estate owner that must be fixed first and the measured
+# trigger that would admit the crate. Until the trigger is met, adding the
+# crate creates a second owner and a larger cold build. A request that needs
+# one of these links its issue and shows the measured gap; a rejected request
+# is closed with the trigger and the owner, not with "not now".
+#
+# Read by `lgwks_deps`: an approval the catalog still defers is refused as
+# `DeferredAdmitted`, naming the owner and the trigger. The catalog is opt-in;
+# a repository without one is audited exactly as before.
+#
+# Families follow srinji-kaggss/logicalworks-crates#724 (post-revenue), #725
+# (data layer), #726 (platform) and #727 (edge). Day-0 optionals that need a
+# trigger of their own close the file.
+
+[[deferred]]
+crate = "openraft"
+family = "data-layer"
+owner = "logical-DB"
+trigger = "A paid multi-node replication requirement arrives with a measured failover test the single node cannot pass."
+replacement = "openraft behind lgwks_deps with the estate log as the source of truth."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/725"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "sqlx"
+family = "data-layer"
+owner = "logical-DB"
+trigger = "A first Postgres customer arrives with a schema and a migration plan the estate store cannot serve."
+replacement = "sqlx behind lgwks_deps with the product still owning its state through the estate store."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/725"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "tiberius"
+family = "data-layer"
+owner = "logical-DB"
+trigger = "A first SQL Server customer arrives and the TDS client gap is measured against the estate store."
+replacement = "tiberius as a client only behind lgwks_deps; the server gap stays open separately."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/725"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "datafusion"
+family = "data-layer"
+owner = "logical-DB"
+trigger = "An analytics query fails p95 or scale on SQLite and tape projections with a measured profile."
+replacement = "datafusion behind lgwks_deps with cold-build and RSS measured before and after."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/725"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "qdrant"
+family = "data-layer"
+owner = "world-model"
+trigger = "A measured recall at k or p99 gap appears that the estate search cannot close after the owner is fixed."
+replacement = "qdrant behind lgwks_deps with the estate search contract unchanged."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/725"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "lance"
+family = "data-layer"
+owner = "world-model"
+trigger = "A columnar and vector workload arrives with a measured need the estate store cannot serve."
+replacement = "lance behind lgwks_deps with the estate remaining the state owner."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/725"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "tantivy"
+family = "data-layer"
+owner = "sentinel"
+trigger = "A search latency or recall gap appears that FTS5 cannot close with a measured corpus profile."
+replacement = "tantivy behind lgwks_deps with the estate search contract unchanged."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/725"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "apalis"
+family = "platform"
+owner = "lgwks_bot"
+trigger = "A workflow arrives that the estate orchestration cannot express after a measured trial."
+replacement = "The estate scheduler remains the owner and no second workflow engine ships."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/726"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "temporal"
+family = "platform"
+owner = "lgwks_bot"
+trigger = "A workflow arrives that the estate orchestration cannot express after a measured trial."
+replacement = "The estate scheduler remains the owner and no second workflow engine ships."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/726"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "restate"
+family = "platform"
+owner = "lgwks_bot"
+trigger = "A workflow arrives that the estate orchestration cannot express after a measured trial."
+replacement = "The estate scheduler remains the owner and no second workflow engine ships."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/726"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "cedar-policy"
+family = "platform"
+owner = "logic-os-kernel"
+trigger = "Tenant-authored AI policy needs formal analysis the kernel and Braid effect gate cannot express."
+replacement = "Cedar as a policy compiler feeding the kernel gate, never a second authority."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/726"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "opentelemetry-rust"
+family = "platform"
+owner = "lgwks_std"
+trigger = "A paying operations requirement names a collector that tracing cannot feed."
+replacement = "OpenTelemetry as a transport behind the tracing instrumentation contract."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/726"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "youki"
+family = "platform"
+owner = "Nova"
+trigger = "Nova needs a container backend for a measured isolation or scale requirement."
+replacement = "Nova remains the runtime owner with no mandatory Kubernetes."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/726"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "firecracker"
+family = "platform"
+owner = "Nova"
+trigger = "Nova needs a microVM backend for a measured isolation or scale requirement."
+replacement = "Nova remains the runtime owner with the microVM as one backend."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/726"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "cloud-hypervisor"
+family = "platform"
+owner = "Nova"
+trigger = "Nova needs a microVM backend for a measured isolation or scale requirement."
+replacement = "Nova remains the runtime owner with the microVM as one backend."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/726"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "kube-rs"
+family = "platform"
+owner = "Nova"
+trigger = "Nova needs a Kubernetes backend for a measured fleet requirement."
+replacement = "Nova remains the runtime owner with Kubernetes as one backend."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/726"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "wasmtime"
+family = "platform"
+owner = "logic-os-kernel"
+trigger = "A plugin or guest sandbox requirement arrives with fuel, epoch and memory bounds."
+replacement = "wasmtime behind lgwks_deps with the kernel owning the guest seam."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/726"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "opendal"
+family = "edge"
+owner = "logical-DB"
+trigger = "A first paid cloud sync or backup requirement arrives the local store cannot serve."
+replacement = "opendal behind lgwks_deps with logical-DB remaining the state owner."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/727"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "s3s"
+family = "edge"
+owner = "logical-DB"
+trigger = "A first Azure Blob customer arrives with a measured object-storage gap."
+replacement = "s3s behind lgwks_deps with the estate owning the sync contract."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/727"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "object_store"
+family = "edge"
+owner = "logical-DB"
+trigger = "A first paid cloud sync or backup requirement arrives the local store cannot serve."
+replacement = "object_store behind lgwks_deps with logical-DB remaining the state owner."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/727"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "pingora"
+family = "edge"
+owner = "sentinel"
+trigger = "A first paid CDN or proxy requirement arrives with a measured edge gap."
+replacement = "Pingora or an independent hyper stack with no day-0 admission."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/727"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "quinn"
+family = "edge"
+owner = "sentinel"
+trigger = "A first paid QUIC transport requirement arrives with a measured gap."
+replacement = "quinn behind lgwks_deps with bounded handshakes and session caches."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/727"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "hickory"
+family = "edge"
+owner = "sentinel"
+trigger = "A first DNS product requirement arrives naming server and resolver surfaces."
+replacement = "hickory behind lgwks_deps with server and resolver as separate decisions."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/727"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "fe2o3-amqp"
+family = "edge"
+owner = "moo"
+trigger = "A first event bus or queue requirement arrives with bounded queues and payloads."
+replacement = "The AMQP client behind lgwks_deps with bounded consumer groups."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/727"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "rdkafka"
+family = "edge"
+owner = "moo"
+trigger = "A first event bus or queue requirement arrives with bounded queues and payloads."
+replacement = "The Kafka client behind lgwks_deps with bounded consumer groups."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/727"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "lapin"
+family = "edge"
+owner = "moo"
+trigger = "A first event bus or queue requirement arrives with bounded queues and payloads."
+replacement = "The AMQP client behind lgwks_deps with bounded consumer groups."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/727"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "async-nats"
+family = "edge"
+owner = "moo"
+trigger = "A first event bus or queue requirement arrives with bounded queues and payloads."
+replacement = "The NATS client behind lgwks_deps with bounded consumer groups."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/727"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "nfsserve"
+family = "edge"
+owner = "logical-DB"
+trigger = "A first file-server customer arrives with a measured NFSv3 gap."
+replacement = "nfsserve behind lgwks_deps with the estate owning the file contract."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/727"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "smb-server"
+family = "edge"
+owner = "logical-DB"
+trigger = "A first Azure Files customer arrives and smb-server passes a maturity review."
+replacement = "smb-server behind lgwks_deps with the estate owning the file contract."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/727"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "workerd"
+family = "edge"
+owner = "next-gen-browser-engine"
+trigger = "A first Workers-compatible product requirement arrives with a measured runtime gap."
+replacement = "workerd stays an oracle and benchmark, never the product base."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/727"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "deno_core"
+family = "edge"
+owner = "next-gen-browser-engine"
+trigger = "A first Workers-compatible product requirement arrives with a measured runtime gap."
+replacement = "deno_core behind lgwks_deps only when the runtime itself is the product."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/727"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "jailguard"
+family = "edge"
+owner = "lgwks_deps"
+trigger = "A corpus case appears that llm-guard cannot cover with p99 and RSS measured."
+replacement = "One filter, not three, with the kernel and Braid gate as the authority."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/727"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "prompt-shield"
+family = "edge"
+owner = "lgwks_deps"
+trigger = "A corpus case appears that llm-guard cannot cover with p99 and RSS measured."
+replacement = "One filter, not three, with the kernel and Braid gate as the authority."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/727"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "schemars"
+family = "day-0-optional"
+owner = "lgwks_deps"
+trigger = "The public API publishes JSON Schema and hand-written schema no longer covers it."
+replacement = "schemars behind lgwks_deps with hand-written schema as the removal path."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/721"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "utoipa"
+family = "day-0-optional"
+owner = "lgwks_deps"
+trigger = "The public API publishes OpenAPI and hand-written OpenAPI no longer covers it."
+replacement = "utoipa behind lgwks_deps with hand-written OpenAPI as the removal path."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/721"
+deferred_on = "2026-10-26"
+
+[[deferred]]
+crate = "tokio-rustls"
+family = "day-0-optional"
+owner = "lgwks_deps"
+trigger = "TLS must terminate in-process and the async TLS bridge is measured on the proven path."
+replacement = "OS reverse proxy termination, which is the day-0 default with zero new crates."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/728"
+deferred_on = "2026-10-26"

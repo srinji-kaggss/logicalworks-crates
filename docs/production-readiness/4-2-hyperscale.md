@@ -99,14 +99,16 @@ data in `bench/async/vps/profile.toml`. Taken 2026-10-11 at host load 2.8,
 | refuse door, bound 64 | no knee: refused 1 arrival at the lowest rung | refused 0 there |
 | overload at bound 64, p99 back to baseline | after 508.8 ms | did not return in the 90 s phase |
 | 1,048,576 in flight, peak RSS | 1,987 MB, no OOM kill | 2,034 MB, no OOM kill |
+| CPU-body knee (300,000 hash rounds, 2 workers) | same knee as baseline at every bound; p99 at knee 0.9–1.9x | 1 |
+
+The CPU row is the 2026-10-26 `saturation-cpu` door
+([`bench/async/vps.md`](../../bench/async/vps.md)), same knee both sides; absolutes load-depressed.
 
 *Not covered, and named:*
 
-- **No real 1–2 vCPU machine has run it.** The cgroup run is one run under
-  OrbStack's scheduler in a VM on the development Mac; a VPS differs in cache,
-  memory bandwidth and noisy neighbours, and `nproc` read 4 because the quota
-  limits CPU time and not visible cores. Every open-loop body is a timer, so a
-  CPU-bound body on two real cores is unmeasured.
+- **No real 1–2 vCPU machine has run it.** The cgroup run is one run under OrbStack's
+  scheduler in a VM on the development Mac; a VPS differs in cache, memory bandwidth and
+  noisy neighbours; the timer doors park, and the CPU-body curve above is the first that burns.
 - `Bot::tick` scaling is now measured to 16,384 sources (#640): 54 663 /
   238 706 / 1 167 019 / 8 471 300 ns/tick at 256 / 1 024 / 4 096 / 16 384, a
   log-log slope of 1.206; `act` carries the superlinear term (§4.9).
@@ -115,6 +117,4 @@ data in `bench/async/vps/profile.toml`. Taken 2026-10-11 at host load 2.8,
   1.05x / 1.01x / 1.12x / 1.05x). Every figure is one host, and nothing here is a
   cross-platform claim.
 
-*To close the axis:* the same matrix on a real 1–2 vCPU box, with a CPU-bound
-body added to the open-loop doors. "Runs for weeks" is now a measured knee and a
-measured recovery rather than a design intent, and it is still not a measured week.
+*To close the axis:* the same matrix on a real 1–2 vCPU box. "Runs for weeks" is now a measured knee and a measured recovery rather than a design intent, and it is still not a measured week.

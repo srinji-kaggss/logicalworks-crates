@@ -30,6 +30,32 @@ The escape hatch is `enforce = false` under `[policy]` in the register itself, a
 reviewable diff carrying a human's name. It is not an environment variable, so a
 build cannot stand the gate down for itself.
 
+## One owner per check
+
+The doc-citation, requirements and spec-owner checks each have exactly one
+implementation in the estate, and it lives here: `contract/GATE_OWNERSHIP.toml`
+names the check, its single file, its shared entry, its binary and its
+designated library consumer, and the `gate_ownership` integration test refuses
+a second file implementing any check's entry. The binaries (`check-doc-citations`,
+`check-requirements`, `check-spec-owners`) are thin shims over the same entries
+`logical_ci`'s `docs-refs` and `governance` gates call as a library, so a changed
+document's dangling citations and an unowned requirement are refused under one
+rule with one owner, not two rule sets drifting apart.
+
+## One installable step
+
+`lgwks-deps gate [PATH]` runs the checks that make the `script!` path bind in
+order — admission, citations, requirements, owners, `script check`, clippy with
+the flow `forbid` lints, and the architecture diff against `--base` — with one
+summary and one exit code (`--json` for agents). A leg with no tool or no base
+to run on is a named skip, never a pass. Consumers add the reusable workflow
+`.github/workflows/consumer-gate.yml` (or the composite action
+`.github/actions/lgwks-gate` directly); it installs the tools from crates.io
+and runs the gate on GitHub-hosted runners. The `gate_consumer` integration
+test drives the shipped binary against scratch consumers with a planted
+unregistered edge, a refused flow and a widening change, and each fails the
+step.
+
 ## Adopting the policy is a separate decision
 
 Using `lgwks_bot`, `lgwks_std`, or `lgwks_ast` in your application does not

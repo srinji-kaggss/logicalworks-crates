@@ -184,6 +184,32 @@ pub enum FlowError {
         /// Which axis disagreed, and what each side holds.
         drift: crate::task::Drift,
     },
+    /// A justification rule stopped the run before it could spend more.
+    ///
+    /// The WAF verdict behind it is `park` (suspend by policy) or `block`
+    /// (refuse by policy), and `reason` is the developer-defined reason code
+    /// the rule named. Not retryable: repeating the same step under the same
+    /// justification asks the same rule the same question.
+    Justified {
+        /// The step the rule was evaluated before.
+        at: Arc<str>,
+        /// The rule that stopped the run.
+        rule: String,
+        /// The reason code the rule named.
+        reason: String,
+    },
+    /// A dependency graph was declared with an unknown need, a duplicate node,
+    /// or a cycle, so no node ran.
+    ///
+    /// Refused before any node starts, naming what is wrong, because a graph
+    /// that started half its nodes before discovering the cycle could not be
+    /// resumed or compensated.
+    Graph {
+        /// The graph step that refused the declaration.
+        at: Arc<str>,
+        /// What is wrong with the declaration.
+        reason: String,
+    },
     /// The durable run store refused to read or write a step's record.
     ///
     /// Carried as the store's own typed error rather than as a rendering of it,
@@ -231,6 +257,24 @@ impl FlowError {
         }
     }
 
+    /// A justification refusal: the rule `rule` stopped the run with its
+    /// reason code `reason`. Not retried.
+    pub fn justified(rule: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::Justified {
+            at: Arc::from(""),
+            rule: rule.into(),
+            reason: reason.into(),
+        }
+    }
+
+    /// A dependency-graph declaration that cannot run, with why. No node ran.
+    pub fn graph(reason: impl Into<String>) -> Self {
+        Self::Graph {
+            at: Arc::from(""),
+            reason: reason.into(),
+        }
+    }
+
     /// Whether repeating the step that produced this could succeed.
     ///
     /// `TimedOut` and `Transient` are; a bot error is when its retry class is
@@ -257,6 +301,8 @@ impl FlowError {
             | Self::InvalidBusinessKey { .. }
             | Self::InvalidBound { .. }
             | Self::Incompatible { .. }
+            | Self::Justified { .. }
+            | Self::Graph { .. }
             | Self::Store { .. } => false,
         }
     }
@@ -281,7 +327,9 @@ impl FlowError {
             | Self::Blocked { ref at, .. }
             | Self::Refused { ref at, .. }
             | Self::Intervention { ref at, .. }
-            | Self::TooDeep { ref at, .. } => at,
+            | Self::TooDeep { ref at, .. }
+            | Self::Justified { ref at, .. }
+            | Self::Graph { ref at, .. } => at,
             Self::Incompatible { ref at, .. } => at,
             Self::Store { ref at, .. } => at,
             // Every other variant is unlocated: it is raised before a step exists
@@ -329,6 +377,8 @@ impl FlowError {
             | Self::Refused { ref mut at, .. }
             | Self::Intervention { ref mut at, .. }
             | Self::TooDeep { ref mut at, .. }
+            | Self::Justified { ref mut at, .. }
+            | Self::Graph { ref mut at, .. }
             | Self::Incompatible { ref mut at, .. }
             | Self::Store { ref mut at, .. } => {
                 if at.is_empty() {
@@ -395,6 +445,17 @@ impl fmt::Display for FlowError {
             Self::TooDeep { ref at, limit } => {
                 write!(formatter, "{at}: steps nested deeper than {limit}")
             }
+            Self::Justified {
+                ref at,
+                ref rule,
+                ref reason,
+            } => write!(
+                formatter,
+                "{at}: justification {rule:?} stopped the run: {reason:?}"
+            ),
+            Self::Graph { ref at, ref reason } => {
+                write!(formatter, "{at}: the graph is not runnable: {reason:?}")
+            }
             Self::InvalidTenant { reason } => write!(formatter, "invalid tenant: {reason}"),
             Self::InvalidName { reason } => write!(formatter, "invalid task name: {reason}"),
             Self::InvalidRequestKey { reason } => {
@@ -433,6 +494,8 @@ impl std::error::Error for FlowError {
             | Self::Transient { .. }
             | Self::Blocked { .. }
             | Self::TooDeep { .. }
+            | Self::Justified { .. }
+            | Self::Graph { .. }
             | Self::InvalidTenant { .. }
             | Self::InvalidName { .. }
             | Self::Incompatible { .. }

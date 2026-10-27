@@ -15,12 +15,12 @@ use lgwks_deps::tokio::process::Command;
 /// descendant inherits it — a confinement that only wrapped the leader's exit
 /// code would be a report, not a boundary.
 ///
-/// Both forms are exec wrappers the platform ships — `sandbox-exec` on macOS,
-/// util-linux `setpriv` on Linux — so neither needs `unsafe` (forbidden
-/// workspace-wide) nor a new edge. The in-process forms that would avoid the
-/// wrapper's extra exec (`sandbox_init`, the raw Landlock syscalls) need an
-/// FFI leaf the workspace gate refuses; that cost is measured in
-/// `docs/production-readiness.md` §4.7.
+/// All forms are exec wrappers the platform ships — `sandbox-exec` on macOS,
+/// util-linux `setpriv` or a mount-namespace wrapper on Linux — so none needs
+/// `unsafe` (forbidden workspace-wide) nor a new edge. The in-process forms
+/// that would avoid the wrapper's extra exec (`sandbox_init`, the raw
+/// Landlock syscalls) need an FFI leaf the workspace gate refuses; that cost
+/// is measured in `docs/production-readiness.md` §4.7.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum Confinement {
@@ -32,6 +32,28 @@ pub enum Confinement {
     /// A Linux Landlock filesystem allowlist confining the child and its
     /// descendants.
     Landlock(LandlockRules),
+    /// A deny-shaped confinement: everything is allowed except the named
+    /// subtrees, which the child and its descendants cannot read.
+    DenyBeneath(DenyBeneath),
+}
+
+impl Confinement {
+    /// Confine the child everywhere except beneath `paths`.
+    ///
+    /// The estate computes the denial as the platform allows: a sandbox
+    /// profile denying reads beneath each path on macOS, an empty `tmpfs`
+    /// overmounted on each path in a mount namespace on Linux. An allowlist
+    /// ([`LandlockRules`]) cannot say "everything but the coordinator's
+    /// state", because it would have to name every sibling of every ancestor
+    /// of that state; this names only the state.
+    #[must_use]
+    pub fn deny_beneath(paths: impl IntoIterator<Item = impl AsRef<Path>>) -> Self {
+        let mut denied = DenyBeneath::new();
+        for path in paths {
+            denied.deny(path);
+        }
+        Self::DenyBeneath(denied)
+    }
 }
 
 /// A macOS sandbox profile, applied to a supervised child before it execs.
@@ -46,7 +68,12 @@ pub enum Confinement {
 /// A denied subpath must name the kernel's resolved path: the sandbox matches
 /// what the filesystem resolves, so a subpath spelled through a symlink
 /// (macOS's symlinked `$TMPDIR` included) names a directory nothing writes
-/// through. Canonicalize denied directories before building the source.
+/// through. Canonicalize denied directories before building the source, which
+/// is what [`Self::deny_read_beneath`] does for its caller.
+///
+/// The profile source is UTF-8 text: SBPL string literals take UTF-8, so a
+/// denied directory under a non-ASCII home confines rather than refusing the
+/// spawn. Only control bytes are refused, at validation and at construction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct SandboxProfile {
@@ -62,10 +89,104 @@ impl SandboxProfile {
     pub const MAX_SOURCE_BYTES: usize = 65_536;
 
     /// Carry `source` as the child's sandbox profile.
+    ///
+    /// Infallible for the callers that build their source from literals;
+    /// [`Self::try_new`] validates eagerly for every other caller.
     pub fn new(source: impl Into<String>) -> Self {
         Self {
             source: source.into(),
         }
+    }
+
+    /// Carry `source` as the child's sandbox profile, refusing what could not
+    /// confine anything before the caller goes further.
+    ///
+    /// # Errors
+    ///
+    /// Exactly what [`Self::validate`] refuses: an empty or oversized source,
+    /// or one carrying a refused control byte.
+    pub fn try_new(source: impl Into<String>) -> io::Result<Self> {
+        let profile = Self {
+            source: source.into(),
+        };
+        profile.validate()?;
+        Ok(profile)
+    }
+
+    /// The `(version 1)(allow default)` profile: the child keeps everything
+    /// the platform allows, and each [`Self::deny_read_beneath`] call takes
+    /// one subtree away.
+    #[must_use]
+    pub fn allow_default() -> Self {
+        Self {
+            source: String::from("(version 1)(allow default)"),
+        }
+    }
+
+    /// Deny reads beneath `path` in this profile.
+    ///
+    /// The denied directory is canonicalized first, so a `$TMPDIR` spelled
+    /// through a symlink names the directory the kernel resolves, and quoted
+    /// for SBPL, so a `"` or `\` in the path cannot break out of the
+    /// subpath literal. The refusal names the path, at construction, far
+    /// from the spawn it would otherwise fail.
+    ///
+    /// # Errors
+    ///
+    /// [`std::io::ErrorKind::InvalidInput`] for a path that cannot be
+    /// resolved, is not UTF-8, or carries a control byte the profile source
+    /// cannot hold, and for a rule that would push the source past
+    /// [`Self::MAX_SOURCE_BYTES`].
+    pub fn deny_read_beneath(&mut self, path: impl AsRef<Path>) -> io::Result<&mut Self> {
+        let resolved = std::fs::canonicalize(path.as_ref()).map_err(|source| {
+            io::Error::new(
+                source.kind(),
+                format!(
+                    "a sandbox denial resolves its directory before quoting it: {}: {source}",
+                    path.as_ref().display()
+                ),
+            )
+        })?;
+        let text = resolved.to_str().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("a sandbox subpath is UTF-8 text: {}", resolved.display()),
+            )
+        })?;
+        if let Some(at) = text.bytes().position(|byte| byte < 0x20 || byte == 0x7f) {
+            lgwks_std::trace::warn!(
+                offset = at,
+                "SandboxProfile::deny_read_beneath refused a denied path holding a control byte"
+            );
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("a sandbox denial holds no control byte, at offset {at}"),
+            ));
+        }
+        let mut rule = String::from("(deny file-read* (subpath \"");
+        for character in text.chars() {
+            match character {
+                '"' => rule.push_str("\\\""),
+                '\\' => rule.push_str("\\\\"),
+                _ => rule.push(character),
+            }
+        }
+        rule.push_str("\"))");
+        if self.source.len().saturating_add(rule.len()) > Self::MAX_SOURCE_BYTES {
+            lgwks_std::trace::warn!(
+                max = Self::MAX_SOURCE_BYTES,
+                "SandboxProfile::deny_read_beneath refused a denial past the source bound"
+            );
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "a sandbox profile is 1..={} printable bytes, this denial would pass it",
+                    Self::MAX_SOURCE_BYTES
+                ),
+            ));
+        }
+        self.source.push_str(&rule);
+        Ok(self)
     }
 
     /// The profile source handed to `sandbox-exec -p`.
@@ -76,15 +197,16 @@ impl SandboxProfile {
 
     /// Refuse a profile that could not confine anything.
     ///
-    /// Empty, oversized, or non-printable sources are refused as
+    /// Empty, oversized, or control-byte sources are refused as
     /// [`std::io::ErrorKind::InvalidInput`]: the supervisor applies profiles,
     /// never repairs them, and a spawn refused here starts nothing.
     ///
     /// # Errors
     ///
     /// [`std::io::ErrorKind::InvalidInput`] for an empty source, one past
-    /// [`Self::MAX_SOURCE_BYTES`], or one carrying a byte outside printable
-    /// ASCII (profiles are ASCII text; anything else is damage or an attack).
+    /// [`Self::MAX_SOURCE_BYTES`], or one carrying an ASCII control byte
+    /// other than tab or newline. Bytes at or above `0x80` are UTF-8 text a
+    /// denied non-ASCII path is spelled in, not damage.
     pub fn validate(&self) -> io::Result<()> {
         if self.source.is_empty() || self.source.len() > Self::MAX_SOURCE_BYTES {
             lgwks_std::trace::warn!(
@@ -95,7 +217,7 @@ impl SandboxProfile {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "a sandbox profile is 1..={} printable bytes, got {}",
+                    "a sandbox profile is 1..={} bytes, got {}",
                     Self::MAX_SOURCE_BYTES,
                     self.source.len()
                 ),
@@ -104,15 +226,15 @@ impl SandboxProfile {
         if let Some(at) = self
             .source
             .bytes()
-            .position(|byte| !byte.is_ascii_graphic() && !byte.is_ascii_whitespace())
+            .position(|byte| byte < 0x20 && !matches!(byte, b'\t' | b'\n') || byte == 0x7f)
         {
             lgwks_std::trace::warn!(
                 offset = at,
-                "SandboxProfile::validate refused a profile source holding a non-text byte"
+                "SandboxProfile::validate refused a profile source holding a control byte"
             );
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("a sandbox profile holds a non-text byte at offset {at}"),
+                format!("a sandbox profile holds a control byte at offset {at}"),
             ));
         }
         Ok(())
@@ -157,6 +279,13 @@ impl PathAccess {
 /// A rule names an existing path, matched as the kernel resolves it when the
 /// rule is applied; a rule naming a missing path refuses the spawn rather than
 /// silently granting nothing.
+///
+/// An allowlist cannot contain a general build run from a sibling directory
+/// of the denied state: it would have to name every sibling of every
+/// ancestor of that state, plus everything any build script reads, within
+/// [`Self::MAX_RULES`]. For "everything but this subtree" use
+/// [`Confinement::deny_beneath`], which the estate computes as the platform
+/// allows.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct LandlockRules {
@@ -234,6 +363,91 @@ impl LandlockRules {
     }
 }
 
+/// A deny-shaped confinement: everything is allowed except the named subtrees.
+///
+/// An allowlist cannot contain a general build run from a sibling directory
+/// of the coordinator's state: it would have to name every sibling of every
+/// ancestor of that state, plus everything any build script reads, within
+/// [`LandlockRules::MAX_RULES`]. This names only the denied subtrees, and the
+/// estate overmounts each with an empty `tmpfs` on Linux (through `bwrap`,
+/// else a mount namespace) or denies reads beneath it in the sandbox profile
+/// on macOS, so the child and every descendant lose exactly those directories.
+///
+/// A rule names an existing directory, matched as the kernel resolves it when
+/// the confinement is applied; a rule naming a missing path or a
+/// non-directory refuses the spawn rather than silently granting nothing.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct DenyBeneath {
+    /// Subtrees the child and its descendants cannot read, in the order named.
+    paths: Vec<PathBuf>,
+}
+
+impl DenyBeneath {
+    /// The most denied subtrees one confinement carries.
+    ///
+    /// Each denial is one overmount and one wrapper argument, so the list is
+    /// bounded like every other spawn input.
+    pub const MAX_PATHS: usize = 64;
+
+    /// The longest path a denial names, in bytes (Linux's `PATH_MAX`).
+    pub const MAX_PATH_BYTES: usize = 4_096;
+
+    /// No denials; [`Self::validate`] refuses it until a path is denied.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Deny the subtree beneath `path`.
+    pub fn deny(&mut self, path: impl AsRef<Path>) -> &mut Self {
+        self.paths.push(path.as_ref().to_path_buf());
+        self
+    }
+
+    /// The denied subtrees, in the order they were named, for inspection only.
+    pub fn paths(&self) -> impl ExactSizeIterator<Item = &Path> {
+        self.paths.iter().map(PathBuf::as_path)
+    }
+
+    /// Refuse a denial list that could not confine anything or that the
+    /// wrapper could misread.
+    ///
+    /// # Errors
+    ///
+    /// [`std::io::ErrorKind::InvalidInput`] for an empty list, one past
+    /// [`Self::MAX_PATHS`], or a path that is relative, longer than
+    /// [`Self::MAX_PATH_BYTES`], or holding a NUL byte.
+    pub fn validate(&self) -> io::Result<()> {
+        if let Some(message) = self.refusal() {
+            lgwks_std::trace::warn!(%message, "DenyBeneath::validate refused a denial list before the fork");
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, message));
+        }
+        Ok(())
+    }
+
+    /// Why this list cannot be applied, or `None` when it can.
+    fn refusal(&self) -> Option<String> {
+        if self.paths.is_empty() || self.paths.len() > Self::MAX_PATHS {
+            return Some(format!(
+                "a denial list holds 1..={} paths, got {}",
+                Self::MAX_PATHS,
+                self.paths.len()
+            ));
+        }
+        self.paths.iter().find_map(|path| {
+            let long = path.as_os_str().len() > Self::MAX_PATH_BYTES;
+            let nulled = path.as_os_str().as_encoded_bytes().contains(&0);
+            (!path.is_absolute() || long || nulled).then(|| {
+                format!(
+                    "a denied path is absolute, at most {} bytes, with no NUL: {path:?}",
+                    Self::MAX_PATH_BYTES
+                )
+            })
+        })
+    }
+}
+
 /// The engine command for `program` under `confinement`: the program itself,
 /// or the platform's wrapper with the program as its operand.
 ///
@@ -254,6 +468,10 @@ pub(super) fn command(confinement: &Confinement, program: &Path) -> io::Result<C
         Confinement::Landlock(ref rules) => {
             rules.validate()?;
             landlock(rules)
+        }
+        Confinement::DenyBeneath(ref denied) => {
+            denied.validate()?;
+            deny(denied)
         }
     }
 }
@@ -321,6 +539,180 @@ fn landlock(_rules: &LandlockRules) -> io::Result<Command> {
     ))
 }
 
+/// Deny `denied`'s subtrees however the platform allows: a sandbox profile
+/// on macOS, an empty `tmpfs` overmounted on each subtree in a mount
+/// namespace on Linux.
+fn deny(denied: &DenyBeneath) -> io::Result<Command> {
+    for path in denied.paths() {
+        let resolved = std::fs::canonicalize(path).map_err(|source| {
+            io::Error::new(
+                source.kind(),
+                format!(
+                    "a denied subtree is resolved before it is overmounted: {}: {source}",
+                    path.display()
+                ),
+            )
+        })?;
+        if !resolved.is_dir() {
+            lgwks_std::trace::warn!(?path, "a denial names a non-directory");
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("a denied path is a directory: {}", path.display()),
+            ));
+        }
+    }
+    deny_platform(denied)
+}
+
+/// Deny `denied`'s subtrees in a sandbox profile (macOS): allow by default,
+/// deny reads beneath each resolved denial.
+#[cfg(target_os = "macos")]
+fn deny_platform(denied: &DenyBeneath) -> io::Result<Command> {
+    let mut profile = SandboxProfile::allow_default();
+    for path in denied.paths() {
+        profile.deny_read_beneath(path)?;
+    }
+    profile.validate()?;
+    sandbox(&profile)
+}
+
+/// Deny `denied`'s subtrees under an empty `tmpfs` in a mount namespace
+/// (Linux): `bwrap` where the host ships it, else `unshare -m` with a shell
+/// that overmounts each denial before it execs the target.
+#[cfg(target_os = "linux")]
+fn deny_platform(denied: &DenyBeneath) -> io::Result<Command> {
+    let wrapper = deny_wrapper(denied.paths())?;
+    mount_namespace_available()?;
+    Ok(Command::from(wrapper))
+}
+
+/// The host's mount-namespace wrapper over `paths`, as a std command the
+/// caller appends the target to: `bwrap` where the host ships it, else
+/// `unshare`.
+#[cfg(target_os = "linux")]
+fn deny_wrapper<'a>(paths: impl Iterator<Item = &'a Path>) -> io::Result<std::process::Command> {
+    if Path::new(BWRAP).exists() {
+        return Ok(bwrap_deny(paths));
+    }
+    if Path::new(UNSHARE).exists() {
+        return Ok(unshare_deny(paths));
+    }
+    lgwks_std::trace::warn!("no mount-namespace wrapper on this host");
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "lgwks_bot: denying a subtree on Linux needs bwrap or unshare",
+    ))
+}
+
+/// Whether this host lets an unprivileged process open the mount namespace a
+/// denial needs, asked once per process.
+///
+/// A container without `CAP_SYS_ADMIN` whose seccomp profile also refuses user
+/// namespaces cannot overmount anything: the wrapper exits before the target
+/// runs, which is fail-closed but reads as the child's own failure. The probe
+/// overmounts the temp directory in a namespace of its own and runs `true`, so
+/// that host gets an `Unsupported` refusal before the fork instead.
+#[cfg(target_os = "linux")]
+fn mount_namespace_available() -> io::Result<()> {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let available = *AVAILABLE.get_or_init(|| {
+        let probe = std::env::temp_dir();
+        let mut command = match deny_wrapper(std::iter::once(probe.as_path())) {
+            Ok(command) => command,
+            Err(error) => {
+                lgwks_std::trace::warn!(%error, "no mount-namespace wrapper to probe");
+                return false;
+            }
+        };
+        command
+            .arg("/bin/true")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        match command.status() {
+            Ok(status) => status.success(),
+            Err(error) => {
+                lgwks_std::trace::warn!(%error, "the mount-namespace probe could not run");
+                false
+            }
+        }
+    });
+    if available {
+        Ok(())
+    } else {
+        lgwks_std::trace::warn!("this host cannot open a mount namespace");
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "lgwks_bot: denying a subtree needs a mount namespace this host refuses",
+        ))
+    }
+}
+
+/// Every other target has no denial wrapper.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn deny_platform(_denied: &DenyBeneath) -> io::Result<Command> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "lgwks_bot: denying a subtree is supported on macOS and Linux only",
+    ))
+}
+
+/// The `bwrap` that overmounts denials, and the `unshare` fallback. Text, not
+/// a `Path`: `Path::new` is not callable in a const on the pinned toolchain.
+#[cfg(target_os = "linux")]
+const BWRAP: &str = "/usr/bin/bwrap";
+
+/// The `unshare` that opens a mount namespace when `bwrap` is absent.
+#[cfg(target_os = "linux")]
+const UNSHARE: &str = "/usr/bin/unshare";
+
+/// `bwrap --bind / / --tmpfs <denied>... --`: the child sees its own root
+/// except for the denied subtrees, which read as empty directories.
+#[cfg(target_os = "linux")]
+fn bwrap_deny<'a>(paths: impl Iterator<Item = &'a Path>) -> std::process::Command {
+    let mut command = std::process::Command::new(BWRAP);
+    command.arg("--bind").arg("/");
+    command.arg("/");
+    for path in paths {
+        command.arg("--tmpfs").arg(path.as_os_str());
+    }
+    command.arg("--");
+    command
+}
+
+/// `unshare -m -r sh -c <overmount, then exec>`: the shell the namespace opens
+/// overmounts each denial from `LGWKS_DENY_<n>` before it execs the target.
+/// `-r` opens a user namespace beside the mount namespace and maps the caller
+/// to root inside it, so an unprivileged supervisor can mount there too.
+///
+/// The denied paths travel in the environment rather than in the script, so
+/// no quoting can misread them. A mount the kernel refuses exits the shell
+/// before the target runs, which is fail-closed: the lane never runs
+/// unconfined, it fails.
+#[cfg(target_os = "linux")]
+fn unshare_deny<'a>(paths: impl Iterator<Item = &'a Path>) -> std::process::Command {
+    const SCRIPT: &str = r#"index=0
+while :; do
+  eval "denied=\${LGWKS_DENY_$index-}"
+  [ -z "$denied" ] && break
+  if [ -e "$denied" ] || [ -L "$denied" ]; then
+    mount -t tmpfs -o size=64M,mode=0755 tmpfs "$denied" || exit 99
+  fi
+  index=$((index+1))
+done
+exec "$@""#;
+    let mut command = std::process::Command::new(UNSHARE);
+    command.arg("-m");
+    command.arg("-r");
+    command.arg("sh");
+    command.arg("-c");
+    command.arg(SCRIPT);
+    command.arg("lgwks-deny");
+    for (index, path) in paths.enumerate() {
+        command.env(format!("LGWKS_DENY_{index}"), path.as_os_str());
+    }
+    command
+}
 /// Whether this host's `setpriv` speaks Landlock, asked once per process.
 ///
 /// util-linux added `--landlock-access` in 2.40; an older `setpriv` would exit

@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::io;
 
-#[cfg(all(not(any(unix, windows)), feature = "process"))]
+#[cfg(all(not(unix), feature = "process"))]
 use super::unsupported;
 #[cfg(all(unix, feature = "process"))]
 use super::{errno_to_io, invalid_pid, pid_from_raw};
@@ -341,6 +341,41 @@ pub fn kill_process(pid: i32) -> io::Result<()> {
 pub fn kill_process(pid: i32) -> io::Result<()> {
     let _ = pid;
     Err(unsupported("process kill_process is Unix-only"))
+}
+
+/// Send SIGCONT to the single process `pid`, resuming it if it is stopped.
+///
+/// The release half of the gated start: the gate shell stops itself before it
+/// execs the payload, and this resumes it once the caller has recorded the
+/// leader's identity. A SIGCONT to a running process is a harmless no-op, so
+/// a release that lands after the payload already runs changes nothing — but
+/// a release is only sent after the gate is observed stopped (see
+/// [`super::child_stopped_without_reaping`]), which is what keeps a racing release
+/// from being lost before the child stops itself.
+///
+/// `pid` must be positive; a non-positive id is refused before any signal
+/// leaves the process.
+#[cfg(all(unix, feature = "process"))]
+pub fn continue_process(pid: i32) -> io::Result<()> {
+    if pid <= 0 {
+        let refusal = Err(invalid_pid());
+        #[cfg(feature = "trace")]
+        crate::trace::debug!(error = ?refusal.as_ref().err(), "continue_process: returning an error to the caller");
+        return refusal;
+    }
+    let target = pid_from_raw(pid)?;
+    rustix::process::kill_process(target, rustix::process::Signal::CONT).map_err(errno_to_io)
+}
+
+/// Send SIGCONT to the single process `pid`.
+///
+/// The `process` capability's gate is Unix; other targets report
+/// [`std::io::ErrorKind::Unsupported`] rather than a release that runs
+/// nothing.
+#[cfg(all(not(unix), feature = "process"))]
+pub fn continue_process(pid: i32) -> io::Result<()> {
+    let _ = pid;
+    Err(unsupported("process continue_process is Unix-only"))
 }
 
 /// Whether `pid` currently names a process.

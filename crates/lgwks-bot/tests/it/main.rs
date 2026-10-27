@@ -223,6 +223,7 @@ mod rt_front_door;
 mod rt_joinset;
 mod rt_process;
 mod rt_process_files;
+mod rt_process_stdin;
 mod rt_runtime_stack;
 mod script_domains;
 mod script_flow;
@@ -305,6 +306,9 @@ mod sim_run_boundaries;
 mod sim_scale;
 mod sim_script;
 mod sim_script_domains;
+mod sim_script_fanout;
+mod sim_script_steps;
+mod sim_script_vocab;
 mod sim_session_front_door;
 mod sim_skew;
 #[cfg(all(feature = "ecs", feature = "wire"))]

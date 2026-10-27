@@ -47,6 +47,7 @@ lgwks-deps init [PATH]          # fail-closed starting register
 lgwks-deps freshness [PATH]     # resolved versus latest on crates.io
 lgwks-deps vendor check [PATH]  # prove the lockfile is covered by the shared vendor tree
 lgwks-deps debug [PATH]         # doctor the default lgwks_std debugger surface
+lgwks-deps sqlite <PATH> [TARGET [SQL ...]]  # open with estate defaults; report or migrate
 ```
 
 `check` runs as the first CI lane. The binary diagnoses; it never approves.

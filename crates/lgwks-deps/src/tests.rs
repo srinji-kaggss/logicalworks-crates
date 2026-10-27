@@ -721,6 +721,9 @@ fn deps_are_approved_leaves() -> TestResult {
                 "lgwks_std",
                 "proc-macro2",
                 "quote",
+                "axum",
+                "tower-http",
+                "llm-guard",
                 "gpui",
                 "appcui",
                 "bevy_ecs",
@@ -733,6 +736,7 @@ fn deps_are_approved_leaves() -> TestResult {
                 "candle-transformers",
                 "tokenizers",
                 "jiff",
+                "rusqlite",
             ],
             "unexpected gate dependencies: {declared:?}"
         );

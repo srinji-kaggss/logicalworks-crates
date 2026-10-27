@@ -259,9 +259,10 @@ fn run(
     write_file(&directory.join("index.html"), &render_index(abilities)?)?;
     write_file(&directory.join("robots.txt"), &render_robots())?;
     write_file(&directory.join("sitemap.xml"), &render_sitemap())?;
+    copy_agent_index(directory)?;
     writeln!(
         out,
-        "wrote {} — index.html, robots.txt, sitemap.xml, {} crates, {} capabilities",
+        "wrote {} — index.html, robots.txt, sitemap.xml, llms.txt, {} crates, {} capabilities",
         directory.display(),
         CRATES.len(),
         abilities.capabilities()
@@ -271,6 +272,19 @@ fn run(
         cause,
     })?;
     Ok(())
+}
+
+/// Serves the agent index at the site root (#718): the repository front page
+/// links `llms.txt`, and the page links it too, so the file a crawler or an
+/// agent fetches from the site root is the same generated index, not a copy
+/// that drifts from it.
+fn copy_agent_index(directory: &Path) -> Result<(), Error> {
+    let from = repository_root().join("llms.txt");
+    let text = fs::read_to_string(&from).map_err(|cause| Error::Io {
+        path: from.clone(),
+        cause,
+    })?;
+    write_file(&directory.join("llms.txt"), &text)
 }
 
 /// The repository the page is rendered from.
@@ -448,5 +462,36 @@ mod tests {
         let sitemap_line = format!("Sitemap: {SITE_URL}sitemap.xml");
         assert!(render_robots().contains(&sitemap_line));
         assert!(render_sitemap().contains(SITE_URL));
+    }
+
+    /// The agent index is served at the site root: the file the site serves
+    /// is the generated `llms.txt` itself, so the root never drifts from it.
+    #[test]
+    fn the_site_root_serves_the_agent_index() -> TestResult {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        // Random bits, not the process id: pids are reused by the OS, so two
+        // runs share no identity through them (the `id` row of the catalog).
+        let bits = lgwks_std::random::bytes::<8>().map_err(|error| error.to_string())?;
+        let dir = std::env::temp_dir().join(format!(
+            "lgwks-render-site-{:016x}",
+            u64::from_le_bytes(bits)
+        ));
+        let abilities = read_capabilities()?;
+        let mut out = Vec::new();
+        super::run(&dir, &abilities, &mut out)?;
+        let served = fs::read_to_string(dir.join("llms.txt"))?;
+        let generated = fs::read_to_string(root.join("llms.txt"))?;
+        assert_eq!(
+            served, generated,
+            "the site root must serve the generated index, not a copy"
+        );
+        assert!(
+            String::from_utf8_lossy(&out).contains("llms.txt"),
+            "the render receipt names the index it served"
+        );
+        if fs::remove_dir_all(&dir).is_err() {
+            // Left for the operating system: a test must not fail on cleanup.
+        }
+        Ok(())
     }
 }

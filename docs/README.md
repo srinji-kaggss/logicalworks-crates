@@ -37,6 +37,8 @@ the rest of this table is design history and contributor policy.
 | [`docs/guides/lgwks-deps/storefront.md`](guides/lgwks-deps/storefront.md) | Every `lgwks_deps` storefront feature, what it re-exports, and what each pulls in. |
 | [`docs/guides/lgwks-deps/embedding.md`](guides/lgwks-deps/embedding.md) | Embedding `check_dependencies` in your own tool, and when adopting the policy is the right call. |
 | [`docs/dependency-doctrine.md`](dependency-doctrine.md) | How a dependency is admitted, the replacement matrix, and where no equivalent exists. Read this before adding a crate. |
+| [`docs/deferral.md`](deferral.md) | The deferred crate catalog: what waits for day 0, each row's owner and measured trigger. |
+| [`docs/patches.md`](patches.md) | Upstream pins that never become forks, and the TLS provider path with its sealed exceptions. |
 | [`docs/async-parity.md`](async-parity.md) | The `lgwks_bot::rt` surface against tokio and the alternatives: the capability matrix, the open gaps, and the deliberate divergences. |
 | [`docs/async-sdk-shape.md`](async-sdk-shape.md) | The async surface as an SDK: its shape, its invariants, and how to migrate. |
 | [`docs/declarative-orchestration.spec.md`](declarative-orchestration.spec.md) | The task-first front door: typed task, host and report, and straight-line typed results. Implemented in part as `lgwks_bot::task`; each requirement is owned by the falsifier rows that require it. |
@@ -88,7 +90,8 @@ the rest of this table is design history and contributor policy.
 | [`docs/workflow/ci-runs.md`](workflow/ci-runs.md) | Workflow §12: the 25 measured CI runs, their layouts, wall clocks and verdicts. |
 | [`docs/governance/gates.md`](governance/gates.md) | Governance §3 and §4: the gates, and change control for governance. |
 | [`docs/governance/open-work.md`](governance/open-work.md) | Governance §6 and §7: open correctness and acceptance work, and the decisions requiring the Director. |
-| [`docs/governance/ledger-2026-10-21.md`](governance/ledger-2026-10-21.md) | Governance §5 ledger, 2026-10-21: the newest part. |
+| [`docs/governance/ledger-2026-10-26.md`](governance/ledger-2026-10-26.md) | Governance §5 ledger, 2026-10-26: the newest part. |
+| [`docs/governance/ledger-2026-10-21.md`](governance/ledger-2026-10-21.md) | Governance §5 ledger, 2026-10-21. |
 | [`docs/governance/ledger-2026-10-09.md`](governance/ledger-2026-10-09.md) | Governance §5 ledger, 2026-10-09 to 2026-10-20. |
 | [`docs/governance/ledger-2026-10-06.md`](governance/ledger-2026-10-06.md) | Governance §5 ledger, 2026-10-06 to 2026-10-08. |
 | [`docs/governance/ledger-2026-09-28-releases.md`](governance/ledger-2026-09-28-releases.md) | Governance §5 ledger: the release cuts of 2026-09-28 to 2026-10-06. |

@@ -94,6 +94,87 @@ pub(crate) async fn body_unit(counter: Arc<AtomicU64>) {
     tokio::task::yield_now().await;
 }
 
+// ── CPU-bound bodies ─────────────────────────────────────────────────────────
+
+/// What an open-loop arrival's body burns.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum BodyKind {
+    /// A counter bump, a yield, and a timer park: the scheduler, not the cores,
+    /// is the binding constraint.
+    Timer,
+    /// A counter bump, a yield, and a fixed, seeded number of hash rounds: the
+    /// cores are the binding constraint.
+    Cpu,
+}
+
+/// Every CPU body hashes from this seed: fixed, so the facade and the baseline
+/// burn identical streams and the fairness gate's work-count check still holds.
+/// Varied per-task streams would be varied load, which is a different
+/// measurement; matched work is the point of the rig.
+pub(crate) const CPU_BODY_SEED: u64 = 0xC941_0AD5_EED4_9EED;
+
+/// One CPU body's work: `rounds` splitmix64 rounds from `seed`.
+///
+/// Splitmix64's gamma, not a crate: this rig admits no new published-crate
+/// edge for its own load shape, and a mixer of a few integer multiplies is
+/// the cheapest deterministic CPU work with a data dependency per round (a
+/// loop the compiler can prove empty is not load). The returned state must be
+/// spent through [`std::hint::black_box`] by the caller: an unused pure value
+/// is dead code the optimizer removes, and a benchmark that measured the
+/// optimizer's mercy would be measuring nothing.
+pub(crate) fn cpu_hash_rounds(seed: u64, rounds: u64) -> u64 {
+    let mut state = seed;
+    for _ in 0..rounds {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        state = z ^ (z >> 31);
+    }
+    state
+}
+
+/// Nanoseconds one CPU hash round costs on this host: the minimum of three
+/// 200,000-round runs, floored at a tenth of a nanosecond.
+///
+/// The minimum, not the mean: calibration runs on a host whose scheduler may
+/// preempt it, and a preempted sample is a sample of the scheduler, not of the
+/// mixer. The floor keeps a zero-cost reading from declaring unbounded
+/// capacity, which is the number this rig exists not to publish. Wall-clocked,
+/// so it is provenance for the offered rates, never for the fairness gate:
+/// both sides of a point run the same rounds whatever it reads.
+pub(crate) fn calibrate_cpu_ns_per_round() -> f64 {
+    const CALIBRATION_ROUNDS: u64 = 200_000;
+    let mut best = f64::MAX;
+    for _ in 0..3 {
+        let start = std::time::Instant::now();
+        std::hint::black_box(cpu_hash_rounds(CPU_BODY_SEED, CALIBRATION_ROUNDS));
+        let nanos = start.elapsed().as_nanos() as f64;
+        best = best.min(nanos / CALIBRATION_ROUNDS as f64);
+    }
+    best.max(0.1)
+}
+
+/// Whole microseconds `rounds` cost at `ns_per_round` each, rounded up, at
+/// least one: the declared cost of a round-pinned CPU body, so the ladder
+/// derives its capacity from what the bodies actually burn.
+pub(crate) fn cpu_body_micros(rounds: u64, ns_per_round: f64) -> u64 {
+    ((rounds as f64 * ns_per_round.max(0.1)) / 1_000.0)
+        .ceil()
+        .max(1.0) as u64
+}
+
+/// Parse `--body-kind`: `timer` (the scheduler binds) or `cpu` (the cores do).
+pub(crate) fn parse_body_kind(text: &str) -> Result<BodyKind, String> {
+    match text {
+        "timer" => Ok(BodyKind::Timer),
+        "cpu" => Ok(BodyKind::Cpu),
+        other => Err(format!(
+            "body-kind must be timer or cpu, not {other:?}: a mistyped kind that silently ran the timer door would report scheduler numbers as CPU numbers"
+        )),
+    }
+}
+
 /// How a facade run ends: drain everything, or stop early and report anyway.
 ///
 /// The drain policy is the only thing that separates an honest facade run from
@@ -319,4 +400,95 @@ pub(crate) fn worker_and_core_cells(workers: Option<usize>) -> (String, usize) {
         Err(_) => 0,
     };
     (workers, cores)
+}
+
+/// The CPU door's body, checked beside the code it burns with (#639).
+#[cfg(test)]
+mod cpu_body_tests {
+    use super::{
+        BodyKind, CPU_BODY_SEED, calibrate_cpu_ns_per_round, cpu_body_micros, cpu_hash_rounds,
+        parse_body_kind,
+    };
+
+    #[test]
+    fn sim_a_cpu_body_is_a_pure_function_of_its_seed_and_rounds() {
+        // The matched-workload premise of the CPU door: the facade and the
+        // baseline burn identical streams, so the same (seed, rounds) must hash
+        // identically on every call, and a different seed or one more round
+        // must hash differently — otherwise the two sides would not be doing
+        // the same work, or two workloads would be one.
+        for rounds in [1_u64, 7, 1_000, 100_000] {
+            let once = cpu_hash_rounds(CPU_BODY_SEED, rounds);
+            assert_eq!(
+                once,
+                cpu_hash_rounds(CPU_BODY_SEED, rounds),
+                "{rounds} rounds did not replay: the body is not a function of its seed alone"
+            );
+            assert_ne!(
+                once,
+                cpu_hash_rounds(CPU_BODY_SEED.wrapping_add(1), rounds),
+                "{rounds} rounds ignored their seed: two workloads hash as one"
+            );
+            assert_ne!(
+                once,
+                cpu_hash_rounds(CPU_BODY_SEED, rounds.saturating_add(1)),
+                "{rounds} rounds ignored their length: two workloads hash as one"
+            );
+        }
+    }
+
+    #[test]
+    fn sim_a_pinned_round_count_declares_its_calibrated_cost() {
+        // The CPU door pins its rounds, so the declared body cost is the
+        // rounds' calibrated cost: the rounding is upwards, so the ladder never
+        // offers past what the workers sustain while the record claims
+        // otherwise.
+        assert_eq!(
+            cpu_body_micros(1_000_000, 2.0),
+            2_000,
+            "1 M rounds at 2 ns/round declare 2 ms, exactly"
+        );
+        assert_eq!(
+            cpu_body_micros(1_000_001, 2.0),
+            2_001,
+            "a part-microsecond rounds up, never down"
+        );
+        assert_eq!(
+            cpu_body_micros(1, 0.1),
+            1,
+            "a single round still declares a body, never an empty one"
+        );
+    }
+
+    #[test]
+    fn sim_the_cpu_calibration_is_a_positive_finite_cost() {
+        // Wall-clocked, so the assertion is loose on purpose: a round costs
+        // nanoseconds, and anything outside a tenth of a nanosecond to a
+        // millisecond is the scheduler in the sample, not the mixer. The sweep
+        // floors the same way; this pins the floor.
+        let ns = calibrate_cpu_ns_per_round();
+        assert!(
+            (0.1..=1_000_000.0).contains(&ns),
+            "calibration read {ns} ns/round: not a cost a mixer can have"
+        );
+    }
+
+    #[test]
+    fn sim_body_kind_parses_strictly() {
+        // A mistyped kind that silently ran the timer door would report
+        // scheduler numbers as CPU numbers, so anything but the two names is a
+        // refusal.
+        assert_eq!(
+            parse_body_kind("timer"),
+            Ok(BodyKind::Timer),
+            "timer must parse"
+        );
+        assert_eq!(parse_body_kind("cpu"), Ok(BodyKind::Cpu), "cpu must parse");
+        for text in ["", "CPU", "timer ", "sleep", "timer,cpu"] {
+            assert!(
+                parse_body_kind(text).is_err(),
+                "{text:?} parsed as a body kind: the door would run under the wrong name"
+            );
+        }
+    }
 }

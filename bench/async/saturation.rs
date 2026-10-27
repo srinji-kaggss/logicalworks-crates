@@ -14,6 +14,7 @@ use crate::gate::{
     BUDGET_EXTRA_BODIES, SLO_P99_NANOS, SideRun, floor_label, open_loop_conserved,
     open_loop_pair_fair,
 };
+use crate::support::{BodyKind, calibrate_cpu_ns_per_round, cpu_body_micros};
 use crate::support::{micros, print_columns, print_row, worker_and_core_cells};
 // ── The saturation sweep ─────────────────────────────────────────────────────
 
@@ -275,13 +276,19 @@ fn print_sweep_row(run: &SideRun) {
 /// stayed inside [`SLO_P99_NANOS`]: a rate past it either refused arrivals or blew the
 /// budget, and either is a refusal rather than a served request.
 pub(crate) async fn saturation_sweep(
-    admission: Admission,
-    window: Duration,
-    capacity_target: u64,
-    body_override: u64,
-    workers: Option<usize>,
+    sweep: SweepRun,
     json: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let SweepRun {
+        admission,
+        window,
+        capacity_target,
+        body_override,
+        body_kind,
+        cpu_rounds_override,
+        workers,
+        ..
+    } = sweep;
     info!("saturation sweep — offered rate against p50/p95/p99 and the ceiling");
     info!(
         "door: {}   window: {} s per point   SLO: p99 <= {} ms",
@@ -306,18 +313,80 @@ pub(crate) async fn saturation_sweep(
     }
     info!("latency is measured from each arrival's INTENDED start\n");
 
+    // One calibration per sweep, not per bound or per side: the cost of a hash
+    // round is a property of this host, and both sides of every point burn the
+    // same rounds whatever it reads.
+    let cpu_ns_per_round = match body_kind {
+        BodyKind::Timer => 0.0,
+        BodyKind::Cpu => calibrate_cpu_ns_per_round(),
+    };
+    if body_kind == BodyKind::Cpu {
+        if cpu_rounds_override == 0 {
+            let refusal: Box<dyn std::error::Error> =
+                "--body-kind=cpu needs --cpu-rounds=N: the CPU door burns a fixed, seeded \
+                 number of hash rounds per task, and a sweep that derived them per bound \
+                 would burn seconds per body at the wide bounds"
+                    .to_owned()
+                    .into();
+            lgwks_std::trace::debug!(error = ?refusal, "saturation_sweep: refusing a CPU door with no pinned rounds");
+            return Err(refusal);
+        }
+        if body_override > 0 {
+            let refusal: Box<dyn std::error::Error> =
+                "--cpu-rounds pins the body cost and so does --body-micros: name one"
+                    .to_owned()
+                    .into();
+            lgwks_std::trace::debug!(error = ?refusal, "saturation_sweep: refusing two pinned body costs");
+            return Err(refusal);
+        }
+        info!(
+            "body kind: cpu — every body burns {cpu_rounds_override} seeded hash rounds, one \
+             work unit recorded; calibration {cpu_ns_per_round:.2} ns/round, the ladder is \
+             derived from the workers' capacity rather than the ceiling's"
+        );
+    }
+    // What the ladder's capacity is derived from: the ceiling for timer
+    // bodies, which park, and the scheduler's workers for CPU bodies, which
+    // burn. A CPU ceiling wider than the worker count never binds — four
+    // workers run four bodies at once however high the ceiling — so deriving
+    // the ladder from the bound would offer past the cores' knee at every
+    // rung and measure the queue, not the contention.
+    // Named workers, else the cores the runtime would discover; a host that
+    // will not say runs the one worker every runtime has.
+    let workers_available = match (workers, std::thread::available_parallelism()) {
+        (Some(named), _) => named,
+        (None, Ok(cores)) => cores.get(),
+        (None, Err(_)) => 1,
+    };
+
     let mut points: Vec<SweepPair> = Vec::new();
     let mut json_rows: Vec<String> = Vec::new();
     let mut json_bodies: Vec<String> = Vec::new();
+    let mut bound_bodies: Vec<(usize, usize, u64)> = Vec::new();
 
     for bound in SWEEP_BOUNDS {
-        let body_micros = body_for_bound(bound, capacity_target, body_override);
+        let basis = match body_kind {
+            BodyKind::Timer => bound,
+            BodyKind::Cpu => workers_available,
+        };
+        // The declared cost is what the knee budget is read against: derived
+        // per bound for timer bodies, the pinned rounds' calibrated cost for
+        // CPU bodies, the same at every bound because the rounds are fixed.
+        let (body_micros, cpu_rounds) = match body_kind {
+            BodyKind::Timer => (body_for_bound(bound, capacity_target, body_override), 0),
+            BodyKind::Cpu => (
+                cpu_body_micros(cpu_rounds_override, cpu_ns_per_round),
+                cpu_rounds_override,
+            ),
+        };
+        bound_bodies.push((bound, basis, body_micros));
         // One warm-up per side per bound, discarded: the first-touch page faults and
         // the runtime's worker start are one-time costs a measured point would
         // otherwise charge to the code under test.
         let warm = OpenLoopSpec {
             body_micros,
-            offered_rate: sweep_rate(bound, body_micros, 1),
+            cpu_rounds,
+            offered_rate: sweep_rate(basis, body_micros, 1),
             window: Duration::from_millis(300),
             arrivals: None,
             bound,
@@ -327,12 +396,13 @@ pub(crate) async fn saturation_sweep(
             open_loop_side(side, admission, &warm).await?;
         }
 
-        let header = sweep_header(bound, body_micros);
+        let header = sweep_header(bound, basis, body_micros, cpu_rounds);
         info!("{header}");
         print_columns(&SWEEP_COLUMNS);
-        for rate in sweep_ladder(bound, body_micros) {
+        for rate in sweep_ladder(basis, body_micros) {
             let spec = OpenLoopSpec {
                 body_micros,
+                cpu_rounds,
                 offered_rate: rate,
                 window,
                 // The count the rate and the window define: both sides are offered the
@@ -371,21 +441,18 @@ pub(crate) async fn saturation_sweep(
             });
         }
         json_bodies.push(format!(
-            "{{\"bound\":{bound},\"body_micros\":{body_micros},\"declared_capacity_per_second\":{}}}",
-            capacity_per_second(bound, body_micros)
+            "{{\"bound\":{bound},\"ladder_basis\":{basis},\"body_micros\":{body_micros},\"cpu_rounds\":{cpu_rounds},\"declared_capacity_per_second\":{}}}",
+            capacity_per_second(basis, body_micros)
         ));
         info!("");
     }
 
-    declare_knees(&points, capacity_target, body_override);
-    let sweep = SweepRun {
-        admission,
-        window,
-        capacity_target,
-        body_override,
-        workers,
+    declare_knees(&points, &bound_bodies);
+    let record = SweepRun {
+        cpu_ns_per_round,
+        ..sweep
     };
-    write_sweep_json(json, &sweep, &json_bodies, &json_rows);
+    write_sweep_json(json, &record, &json_bodies, &json_rows);
     Ok(())
 }
 
@@ -396,20 +463,25 @@ pub(crate) async fn saturation_sweep(
 /// every row below is judged by, and a test must be able to call the exact
 /// string that is printed: the defect this replaced printed the nanosecond
 /// constant beside a `ms` label.
-fn sweep_header(bound: usize, body_micros: u64) -> String {
+fn sweep_header(bound: usize, basis: usize, body_micros: u64, cpu_rounds: u64) -> String {
     let budget = SLO_P99_NANOS.max(
         body_micros
             .saturating_mul(1_000)
             .saturating_mul(1 + BUDGET_EXTRA_BODIES),
     );
+    let body = if cpu_rounds > 0 {
+        format!("a {body_micros} us CPU body of {cpu_rounds} hash rounds")
+    } else {
+        format!("a {body_micros} us body")
+    };
     format!(
-        "bound {bound}  (declared capacity {} arrivals/s at a {body_micros} us body; knee budget \
+        "bound {bound}  (declared capacity {} arrivals/s at {body}; knee budget \
          {:.1} ms = the {} floor or {BUDGET_EXTRA_BODIES} further service time{}, whichever is \
          larger)",
-        capacity_per_second(bound, body_micros),
+        capacity_per_second(basis, body_micros),
         budget as f64 / 1_000_000.0,
         floor_label(),
-        if ladder_clamped(bound, body_micros) {
+        if ladder_clamped(basis, body_micros) {
             "; ladder top clamped by the generator's own rate"
         } else {
             ""
@@ -423,15 +495,23 @@ fn sweep_header(bound: usize, body_micros: u64) -> String {
 /// budget. It is declared rather than eyeballed because a curve has no knee of its
 /// own: the same table read against a 10 ms SLO has a different one, and the SLO is
 /// named on the same line so the two cannot be separated.
-fn declare_knees(points: &[SweepPair], capacity_target: u64, body_override: u64) {
+///
+/// `bodies` is the ceiling, the ladder basis and the declared body cost per
+/// bound the sweep ran: the basis is the ceiling itself for timer bodies and
+/// the worker count for CPU bodies, so the ladder is rebuilt from what ran
+/// rather than from what a ceiling-derived arithmetic would have said.
+fn declare_knees(points: &[SweepPair], bodies: &[(usize, usize, u64)]) {
     info!(
         "knee — the highest offered rate with no refusal and p99 inside the bound's budget \
          ({} or {BUDGET_EXTRA_BODIES} further service time, whichever is larger)",
         floor_label()
     );
     print_columns(&KNEE_COLUMNS);
-    for bound in SWEEP_BOUNDS {
-        let ladder = sweep_ladder(bound, body_for_bound(bound, capacity_target, body_override));
+    for (bound, basis, body_micros) in bodies {
+        let bound = *bound;
+        let basis = *basis;
+        let body_micros = *body_micros;
+        let ladder = sweep_ladder(basis, body_micros);
         // `sweep_ladder` maps every multiplier to a rate, so the ladder is never empty;
         // a bound with no rungs has no knee to report and is skipped rather than given
         // an invented top rate.
@@ -454,14 +534,11 @@ fn declare_knees(points: &[SweepPair], capacity_target: u64, body_override: u64)
                     refused_at_top = run.refused;
                 }
             }
-            let clamped =
-                if ladder_clamped(bound, body_for_bound(bound, capacity_target, body_override))
-                    && knee_rate == top_rate
-                {
-                    " (generator-capped)"
-                } else {
-                    ""
-                };
+            let clamped = if ladder_clamped(basis, body_micros) && knee_rate == top_rate {
+                " (generator-capped)"
+            } else {
+                ""
+            };
             // A knee of zero is not a knee of nothing: it is a ladder on which every rung
             // was past the budget, and saying so is the fact a reader needs. A bare `0`
             // in this column reads as "not measured".
@@ -498,6 +575,13 @@ pub(crate) struct SweepRun {
     pub(crate) capacity_target: u64,
     /// A fixed body cost in microseconds, or `0` to derive it per bound.
     pub(crate) body_override: u64,
+    /// Whether bodies parked on timers or burned hash rounds.
+    pub(crate) body_kind: BodyKind,
+    /// Nanoseconds one hash round calibrated at on this host: filled in by the
+    /// sweep, `0` as the caller passes it.
+    pub(crate) cpu_ns_per_round: f64,
+    /// Pinned hash rounds per body, or `0` to derive them per bound.
+    pub(crate) cpu_rounds_override: u64,
     /// The runtime's worker count, when one was set.
     pub(crate) workers: Option<usize>,
 }
@@ -516,13 +600,22 @@ fn write_sweep_json(json: Option<&str>, sweep: &SweepRun, bounds: &[String], row
         window,
         capacity_target,
         body_override,
+        body_kind,
+        cpu_ns_per_round,
+        cpu_rounds_override,
         workers,
     } = *sweep;
     let (workers, cores) = worker_and_core_cells(workers);
+    let kind = match body_kind {
+        BodyKind::Timer => "timer",
+        BodyKind::Cpu => "cpu",
+    };
     let body = format!(
         "{{\"tool\":\"lgwks-bench-async-saturation\",\"door\":\"{}\",\
           \"window_seconds\":{},\"capacity_target_per_second\":{capacity_target},\
-          \"body_micros_override\":{body_override},\"max_offered_rate\":{MAX_OFFERED_RATE},\
+          \"body_micros_override\":{body_override},\"body_kind\":\"{kind}\",\
+          \"cpu_ns_per_round\":{cpu_ns_per_round:.3},\"cpu_rounds_override\":{cpu_rounds_override},\
+          \"max_offered_rate\":{MAX_OFFERED_RATE},\
           \"runtime_workers\":{},\"host_cores_visible\":{},\
           \"declared_capacity_note\":\"a point's declared capacity is bound * 1000000 / \
           body_micros arrivals per second, and the body cost is derived per bound to reach \
@@ -595,14 +688,31 @@ mod tests {
     /// defect this guards printed `50000000 ms` for a 50 ms floor.
     #[test]
     fn the_sweep_header_names_the_floor_in_milliseconds() {
-        let header = sweep_header(64, 3_200);
+        for cpu_rounds in [0_u64, 1_600_000] {
+            let header = sweep_header(64, 64, 3_200, cpu_rounds);
+            assert!(
+                header.contains("the 50 ms floor"),
+                "the printed header must name the 50 ms floor: {header}"
+            );
+            assert!(
+                !header.contains("50000000"),
+                "the nanosecond constant beside a ms label was the defect: {header}"
+            );
+        }
+        let cpu = sweep_header(64, 2, 950, 300_000);
         assert!(
-            header.contains("the 50 ms floor"),
-            "the printed header must name the 50 ms floor: {header}"
+            cpu.contains("300000"),
+            "the CPU header must name its rounds: {cpu}"
+        );
+        // Two workers at a 950 us body sustain 2,105 arrivals/s; the ceiling's
+        // 64 would say 67,368. The header must read the workers'.
+        assert!(
+            cpu.contains("2105"),
+            "the CPU header must derive its capacity from the workers: {cpu}"
         );
         assert!(
-            !header.contains("50000000"),
-            "the nanosecond constant beside a ms label was the defect: {header}"
+            !cpu.contains("67368"),
+            "the CPU header must not derive its capacity from the ceiling: {cpu}"
         );
     }
 }

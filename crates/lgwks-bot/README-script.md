@@ -9,8 +9,10 @@ said: indented flows of `each`, `within`, `retry`, `together`, `step`, `for` and
 `if`, which expand to plain `async fn`s over `lgwks_bot::script`. It exists
 because orchestration is where generated code fails most: fan-outs with no
 bound, retries with no budget, waits with no deadline, work that loses track of
-which tenant it is for, and a system nobody can see the shape of. The language
-has no way to write the first three, and makes the last two automatic.
+which tenant it is for, and a system nobody can see the shape of. The first
+three have no spelling and the last two are automatic; and deadlines and stops
+are cooperative — they take effect at every `.await` and every `for`
+iteration, while a synchronous stretch between two awaits is not preempted.
 
 ```rust
 use lgwks_bot::script::{FlowError, Scope, Tenant};
@@ -40,10 +42,12 @@ The code reads top to bottom like a synchronous script; what runs is
 asynchronous, concurrent and bounded. What every flow gets without asking:
 
 - **The computer picks the numbers people get wrong.** `each` with no bound
-  runs 64 bodies per available core, capped at 65,536; a concurrency number
-  typed as a literal is a compile error, because it is right on one host and
-  wrong on the next. A limit that comes from outside (an upstream's quota) is
-  written `at most (quota) at once`.
+  draws from one process-wide pool: 64 bodies per available core, capped at
+  65,536 outstanding across every root scope in the process, so concurrent
+  roots divide the allowance instead of each taking the machine's width; a
+  concurrency number typed as a literal is a compile error, because it is
+  right on one host and wrong on the next. A limit that comes from outside
+  (an upstream's quota) is written `at most (quota) at once`.
 - **Retries cannot storm.** `retry up to N times` is also bounded by a budget
   shared by every `retry` under the root scope: 10 retries, plus one for every
   five first attempts (Finagle's `RetryBudget` defaults). One flaky step keeps
@@ -63,7 +67,8 @@ asynchronous, concurrent and bounded. What every flow gets without asking:
   `scope.key()` is BLAKE3 over its tenant, its run and its *structural* path
   (`crawl/each:page#41/retry`), never a line number, so the key an effect is
   deduplicated by survives an edit, a retry and a restart, two tenants never
-  share one, and two runs of one flow never share one either. Work that is one
+  share one, and two runs of one flow never share one either. The tenant is its
+trusted host's partition key, not an authenticated identity. Work that is one
   effect across runs — one charge per order — names itself with
   `scope.business_key(name, &input)` instead.
 - **Stop reaches everything.** The scope carries a `CancellationToken`; a
@@ -74,9 +79,10 @@ asynchronous, concurrent and bounded. What every flow gets without asking:
 - **A map.** Every script emits `ARCHITECTURE`: its flows, their signatures,
   which flows each one `run`s and the tree of blocks, as text or JSON.
 - **Refusals.** `.unwrap()`, `.expect()`, `panic!` and friends, `loop`,
-  `while`, `spawn`, unbounded channels, `block_on`, `thread::sleep`, `unsafe`
-  and machine-specific absolute paths are compile errors naming what to write
-  instead.
+  `while`, `spawn`, unbounded channels, `block_on`, `thread::sleep`, `unsafe`,
+  direct file, network and process paths and `repeat`/`cycle` spellings of an
+  endless iterator, and machine-specific absolute paths are compile errors naming
+  what to write instead. I/O from a flow runs only through a registered domain.
 
 `each` runs its bodies on the calling task, not as spawned tasks, so a body may
 borrow the flow's locals: no `Arc`, no `clone`, no `'static`. It polls at most

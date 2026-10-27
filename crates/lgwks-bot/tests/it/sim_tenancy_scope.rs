@@ -90,6 +90,27 @@ async fn trace_each(
     .await
 }
 
+/// The step key `tenant_name` computes for one item: the shared probe
+/// `each_body_scopes_carry_the_root_tenant` and `the_same_string_is_the_same_tenant`
+/// key their tenants with.
+fn key_under(tenant_name: &str) -> Result<String, Box<dyn Error>> {
+    let scope = Scope::root(Tenant::new(tenant_name)?);
+    let values = lgwks_bot::block_on(each(
+        &scope,
+        "page",
+        None,
+        0..1_usize,
+        |item_scope, _item| async move { Ok::<String, FlowError>(item_scope.key().to_hex()) },
+    ));
+    match values {
+        Ok(values) => match values.into_iter().next() {
+            Some(key) => Ok(key),
+            None => Err(format!("{tenant_name} ran no item").into()),
+        },
+        Err(error) => Err(format!("{tenant_name}'s fan-out failed: {error}").into()),
+    }
+}
+
 /// Every `each` body runs in a scope of the root's tenant, and the tenant is
 /// what distinguishes two tenants' keys over the same items.
 #[test]
@@ -123,23 +144,6 @@ fn each_body_scopes_carry_the_root_tenant() -> TestResult {
     }
     // The same path under two tenants keys differently: the tenant is in the
     // key, so one tenant's retried effect is never another's.
-    let key_under = |tenant_name: &str| -> Result<String, Box<dyn Error>> {
-        let scope = Scope::root(Tenant::new(tenant_name)?);
-        let values = lgwks_bot::block_on(each(
-            &scope,
-            "page",
-            None,
-            0..1_usize,
-            |item_scope, _item| async move { Ok::<String, FlowError>(item_scope.key().to_hex()) },
-        ));
-        match values {
-            Ok(values) => match values.into_iter().next() {
-                Some(key) => Ok(key),
-                None => Err(format!("{tenant_name} ran no item").into()),
-            },
-            Err(error) => Err(format!("{tenant_name}'s fan-out failed: {error}").into()),
-        }
-    };
     let one = key_under("acme")?;
     let other = key_under("globex")?;
     assert!(one != other, "the same path keys differently per tenant");
@@ -363,6 +367,36 @@ fn the_same_scope_trace_replays() -> TestResult {
     assert_eq!(
         first, second,
         "the same definitions produce the same tenant-and-key trace twice"
+    );
+    Ok(())
+}
+
+/// The crate's reserved tenant is refused at the door, so no caller adopts
+/// the unsupervised fan-out's namespace by spelling it.
+#[test]
+fn a_reserved_tenant_is_refused() -> TestResult {
+    match Tenant::new("fan-out") {
+        Ok(_) => Err("the reserved fan-out tenant must be refused".into()),
+        Err(error) => {
+            assert!(
+                error.to_string().contains("reserved"),
+                "the refusal names the reservation: {error}"
+            );
+            Ok(())
+        }
+    }
+}
+
+/// The tenant name is self-asserted: two hosts built with the same string key
+/// the same steps. Isolation keeps honest tenants from colliding; it does not
+/// stop an adversary who chooses another tenant's name.
+#[test]
+fn the_same_string_is_the_same_tenant() -> TestResult {
+    let first = key_under("acme")?;
+    let second = key_under("acme")?;
+    assert_eq!(
+        first, second,
+        "no credential binds the name, so the same string is the same namespace"
     );
     Ok(())
 }

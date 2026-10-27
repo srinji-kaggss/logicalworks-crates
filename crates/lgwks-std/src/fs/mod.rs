@@ -26,6 +26,8 @@ pub mod capability;
 mod engine;
 #[cfg(test)]
 mod predicate_tests;
+/// The streaming walk: entries out as they are read.
+mod stream;
 #[cfg(test)]
 mod tests;
 
@@ -34,6 +36,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use self::engine::{WalkMode, enter_everything, run_walk};
+
+pub use stream::{OmissionAction, OmissionPolicy, WalkIter, WalkStreamEntry, walk_dir_iter};
 
 /// Options for configuring a recursive filesystem walk.
 #[derive(Debug, Clone)]
@@ -177,12 +181,27 @@ pub enum Descend {
     Stop,
 }
 
+/// The path with the canonical root's leading components stripped, so the path
+/// walks and the streaming walk name the same relative path without repeating
+/// the walk.
+pub(crate) fn relative_to_root(path: &Path, root_components: usize) -> &Path {
+    let mut below_root = path.components();
+    for _ in 0..root_components {
+        below_root.next();
+    }
+    below_root.as_path()
+}
+
 /// One entry a [`walk_dir_entries`] walk admitted, with the `lstat` the walk
 /// classified it by.
 ///
 /// The metadata is the walk's own observation, read once from the directory
 /// entry without following a final symlink: holding it costs the caller no
 /// second stat, and it is a snapshot that does not change if the file does.
+///
+/// [`WalkStreamEntry::relative_path`] names the same path through the shared
+/// `relative_to_root` helper, so the two walkers cannot drift into spelling
+/// it differently.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct WalkEntry {
@@ -210,11 +229,7 @@ impl WalkEntry {
     /// itself is not an entry.
     #[must_use]
     pub fn relative_path(&self) -> &Path {
-        let mut below_root = self.path.components();
-        for _ in 0..self.root_components {
-            below_root.next();
-        }
-        below_root.as_path()
+        relative_to_root(&self.path, self.root_components)
     }
 
     /// The kind the walk classified the entry as, from its own `lstat`.
@@ -444,6 +459,18 @@ impl WalkFailure {
     #[must_use]
     pub fn source_error(&self) -> &io::Error {
         &self.source
+    }
+
+    /// Build the failure a streaming omission reports.
+    ///
+    /// Crate-internal: the streaming walk owns every omission it yields, and
+    /// the materializing walks own theirs, so neither builds the other's.
+    pub(crate) fn for_stream(path: PathBuf, stage: OmissionStage, source: io::Error) -> Self {
+        Self {
+            path,
+            stage,
+            source,
+        }
     }
 }
 

@@ -45,6 +45,8 @@ mod default_run;
 mod embedding;
 mod estate_edges;
 mod feature_policy;
+mod gate_consumer;
+mod gate_ownership;
 mod identity_binding;
 mod metadata_dimensions;
 mod metadata_public_api;
@@ -71,4 +73,6 @@ mod sim_policy_properties;
 mod sim_register_policy;
 mod sim_seed_draws;
 mod sim_vendor_coverage;
+#[cfg(feature = "sqlite")]
+mod sqlite_defaults;
 mod workstream_c;

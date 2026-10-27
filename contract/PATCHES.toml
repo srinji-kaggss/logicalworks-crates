@@ -1,0 +1,43 @@
+# Supply-chain ledger — upstream pins that never become forks, and sealed TLS
+# provider exceptions with expiry dates.
+#
+# When an OSS crate does not work, the answer is an upstream patch, not a
+# permanent fork (#723): reproduce in a test, file an upstream issue, open an
+# upstream PR, and record the pin here with its digest and expiry. When
+# upstream merges, the pin is removed, the lockfile updates, and the regression
+# test stays. A fork is never the base; a temporary vendor tree needs a patch
+# digest, provenance, expiry and a removal test.
+#
+# Sealed provider exceptions (#728) excuse the blocked providers the resolved
+# tree cannot yet avoid: ring (Apache-2.0 AND ISC) and webpki-roots
+# (CDLA-Permissive-2.0) arrive transitively behind the admitted ureq edge. Day
+# 0 terminates TLS at the OS reverse proxy with zero new crates; in-process TLS
+# needs a provider whose license passes, and until one is verified these two
+# rows are the sealed exception with owner, date, blast radius and removal
+# path. An expired row is a refusal, and a blocked provider with no live row
+# is refused with the chain that pulled it in.
+#
+# Read by `lgwks_deps`: the ledger is opt-in, and a repository without one is
+# audited exactly as before.
+
+[[patch]]
+crate = "ring"
+kind = "provider-exception"
+owner = "lgwks_std"
+reason = "The http feature resolves ring transitively through ureq and rustls with no passing provider verified."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/728"
+recorded_on = "2026-10-26"
+expires_on = "2027-04-26"
+blast_radius = "Default-off http feature only; no in-process TLS in the day-0 path and no direct edge."
+removal_trigger = "HTTP proofs pass with equal p99 and no ring in the resolved tree."
+
+[[patch]]
+crate = "webpki-roots"
+kind = "provider-exception"
+owner = "lgwks_std"
+reason = "The http feature resolves webpki-roots transitively through ureq and rustls with no passing store verified."
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/728"
+recorded_on = "2026-10-26"
+expires_on = "2027-04-26"
+blast_radius = "Default-off http feature only; no in-process TLS in the day-0 path and no direct edge."
+removal_trigger = "HTTP proofs pass with equal p99 and no webpki-roots in the resolved tree."

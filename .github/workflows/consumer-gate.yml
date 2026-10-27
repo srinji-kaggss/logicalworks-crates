@@ -1,0 +1,64 @@
+name: Consumer gate
+
+# The installable step (#656): a consumer repository adds a few lines and the
+# estate's script!-path checks run on GitHub-hosted runners — no self-hosted
+# machine, no private hooks, no assembled pipeline of its own.
+#
+# A consumer calls it with:
+#
+# ```yaml
+# jobs:
+#   gate:
+#     uses: srinji-kaggss/logicalworks-crates/.github/workflows/consumer-gate.yml@v1
+#     with:
+#       base: ${{ github.base_ref }}
+# ```
+#
+# The checkout needs the base revision locally (`fetch-depth: 0` below), or
+# the architecture leg skips with its reason and says so. A green gate with a
+# skipped leg reads as what it is: the summary names every skip.
+
+on:
+  workflow_call:
+    inputs:
+      path:
+        description: Repository to gate, relative to the checkout.
+        type: string
+        default: .
+      base:
+        description: The architecture diff's base revision or directory.
+        type: string
+        default: origin/main
+      toolchain:
+        description: Rust toolchain the clippy leg runs under.
+        type: string
+        default: 1.99.1
+      lgwks-deps-version:
+        description: lgwks_deps version to install; empty means the newest.
+        type: string
+        default: ''
+      lgwks-ast-version:
+        description: lgwks_ast version to install; empty means the newest.
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Consumer gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Run the consumer gate
+        uses: ./.github/actions/lgwks-gate
+        with:
+          path: ${{ inputs.path }}
+          base: ${{ inputs.base }}
+          toolchain: ${{ inputs.toolchain }}
+          lgwks-deps-version: ${{ inputs.lgwks-deps-version }}
+          lgwks-ast-version: ${{ inputs.lgwks-ast-version }}

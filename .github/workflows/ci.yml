@@ -1397,7 +1397,10 @@ jobs:
   # kernel. Both seams are cross-interpreted by name, so `process::darwin` runs
   # its sysctl code on a Linux runner and `process::windows` runs its `kernel32`
   # code without a Windows one; the live-kernel tests are `#[cfg(not(miri))]` in
-  # both modules, so the interpreter never reaches a foreign call.
+  # both modules, so the interpreter never reaches a foreign call. The mTLS test
+  # PKI (rcgen and rustls on ring, which is C and assembly) sits in lgwks_std's
+  # `cfg(not(miri))` dev-dependency table, so `cargo miri test --lib` never
+  # builds it (run 40568803851 failed compiling ring before the table existed).
   #
   # The step carries the lane's command text verbatim, so `check-gate-parity`
   # compares them: the nightly is pinned in the lane table, not in

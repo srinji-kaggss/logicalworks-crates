@@ -1,9 +1,14 @@
 //! `net` owns the network endpoint domain. Requires `bot.net`.
 //!
-//! Bound to [`lgwks_std::http`]: a poll is one GET, redirects and body
-//! included, bounded by a 10s deadline, with a declared body ceiling. Reachable endpoints report status and a 4 KiB body
-//! preview; transport failure reports unreachable with status 0 (so a bot can
-//! condition on downtime); a malformed URL is a spec bug and errors.
+//! Bound to [`lgwks_std::http`] through one pooled client per endpoint
+//! (`client`): a poll is one streamed GET, redirects and body included,
+//! bounded by a 10s deadline, with a declared body ceiling. Reachable
+//! endpoints report status and a 4 KiB body preview, or the first event's data
+//! when the endpoint streams server-sent events; transport failure reports
+//! unreachable with status 0 (so a bot can condition on downtime); a malformed
+//! URL is a spec bug and errors. A query walks the endpoint as a JSON-array
+//! listing across its `Link: rel="next"` pages, and an action posts a body to
+//! it and reports the reply.
 //!
 //! The preview is bounded where the bytes are read, not after: a poll asks the
 //! transport for at most the byte ceiling it declares and keeps the prefix it
@@ -11,9 +16,8 @@
 //! ceiling and the preview are two numbers for one purpose, so the preview is
 //! derived from [`BODY_PREVIEW`](crate::domain::net::BODY_PREVIEW) rather than written down twice.
 
-use std::time::Duration;
-
-use lgwks_std::http::{self, BodyPolicy, Options};
+use lgwks_std::http::{self, Paginate};
+use lgwks_std::json;
 
 use crate::cap::{Auth, Cap};
 use crate::error::{BotError, DispatchCertainty};
@@ -37,10 +41,10 @@ pub const BODY_PREVIEW: usize = 4096;
 /// monitor is watching for; the preview is what it costs to know it.
 const BODY_PREVIEW_BYTES: usize = BODY_PREVIEW.saturating_mul(4);
 
-/// Seconds a poll waits for the endpoint.
-const POLL_TIMEOUT_SECS: u64 = 10;
+mod client;
 
-/// Observe or query a network endpoint. Supports Observe and Query.
+/// Observe, query or post to a network endpoint. Supports Observe, Query and
+/// Execute.
 #[derive(Debug)]
 pub struct Endpoint {
     /// The URL probed on each poll, resolved at construction.
@@ -48,6 +52,9 @@ pub struct Endpoint {
     /// Forced to `[bot.net]` by the constructor: a probe dials out, and no
     /// constructor omits the capability.
     caps: Vec<Cap>,
+    /// The pooled client every exchange of this endpoint shares, or why it
+    /// could not be built; the reason is reported by the first call, typed.
+    client: Result<http::Client, client::Setup>,
 }
 
 /// Network state returned by observation or query.
@@ -121,12 +128,78 @@ impl NetState {
 
 impl Endpoint {
     /// Create a network endpoint observer.
+    ///
+    /// The pooled client is built here, its TLS material (if the environment
+    /// names any) proven before any socket opens. The ceiling is the
+    /// preview's own budget, so an exchange reads what the probe can use and
+    /// nothing more; preview rather than refuse, because a body larger than a
+    /// preview is the normal case for a live endpoint and refusing it would
+    /// trade a status code for nothing.
     pub fn new(url: impl Into<String>) -> Self {
         Self {
             url: url.into(),
             caps: vec![Cap::net()],
+            client: client::build(BODY_PREVIEW_BYTES),
         }
     }
+
+    /// A refusal of this endpoint's, with `certainty` and `cause`.
+    fn refusal(&self, certainty: DispatchCertainty, cause: String) -> BotError {
+        BotError::DomainError {
+            domain: ENDPOINT.into(),
+            certainty,
+            cause,
+        }
+    }
+
+    /// The malformed-URL refusal: a spec bug, and nothing was sent.
+    fn invalid_url(&self) -> BotError {
+        self.refusal(
+            DispatchCertainty::Refused,
+            "invalid endpoint URL (absolute http(s) URI required)".into(),
+        )
+    }
+
+    /// The pooled client, or the typed reason it could not be built.
+    fn pooled(&self) -> Result<http::Client, BotError> {
+        match self.client {
+            Ok(ref pooled) => Ok(pooled.clone()),
+            Err(ref setup) => Err(self.refusal(
+                DispatchCertainty::Refused,
+                format!("the endpoint's client could not be built: {setup}"),
+            )),
+        }
+    }
+
+    /// Run `job` on the shared blocking pool.
+    ///
+    /// The bounded form: a burst of concurrent calls waits for, or is refused
+    /// by, the shared blocking pool rather than starting one OS thread per
+    /// call. A refusal sent nothing, so it is `Refused`.
+    async fn blocking<T: Send + 'static>(
+        &self,
+        job: impl FnOnce() -> T + Send + 'static,
+    ) -> Result<T, BotError> {
+        let request = lgwks_std::task::try_spawn_blocking(job).map_err(|error| {
+            lgwks_std::trace::debug!(%error, "net: the blocking pool refused the request");
+            self.refusal(
+                DispatchCertainty::Refused,
+                format!("no thread was available for the request: {error}"),
+            )
+        })?;
+        Ok(request.await)
+    }
+}
+
+/// The domain identifier every verb of [`Endpoint`] reports.
+const ENDPOINT: &str = "net::endpoint";
+
+/// At most [`BODY_PREVIEW`] characters of `bytes`, decoded lossily.
+fn preview_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .take(BODY_PREVIEW)
+        .collect()
 }
 
 impl verb::Observe for Endpoint {
@@ -138,70 +211,97 @@ impl verb::Observe for Endpoint {
 
     async fn poll(&self, call: (Auth, ())) -> Result<NetState, BotError> {
         call.0.check(self.required_caps())?;
+        let pooled = self.pooled()?;
         let url = self.url.clone();
-        // The ceiling is the preview's own budget, so the exchange reads what
-        // the probe can use and nothing more. Preview rather than the refusing
-        // default: a body larger than a preview is the normal case for a live
-        // endpoint, and refusing it would trade a status code for nothing.
-        // The deadline, not only the per-phase timeout: a redirect chain would
-        // otherwise give each hop's every phase its own ten seconds.
-        let options = Options::default()
-            .timeout(Duration::from_secs(POLL_TIMEOUT_SECS))
-            .deadline(Duration::from_secs(POLL_TIMEOUT_SECS))
-            .max_body_bytes(BODY_PREVIEW_BYTES)
-            .body_policy(BodyPolicy::Preview);
-        // The bounded form: a burst of concurrent polls waits for, or is
-        // refused by, the shared blocking pool rather than starting one OS
-        // thread per poll. A refusal sent nothing, so it is `Refused`.
-        let request = lgwks_std::task::try_spawn_blocking(move || http::get_with(&url, &options))
-            .map_err(|error| {
-            lgwks_std::trace::debug!(%error, "poll: the blocking pool refused the request");
-            BotError::DomainError {
-                domain: self.domain_id().into(),
-                certainty: DispatchCertainty::Refused,
-                cause: format!("no thread was available for the request: {error}"),
+        match self
+            .blocking(move || client::preview(&pooled, &url))
+            .await?
+        {
+            Ok((status, bytes)) => Ok(NetState::new(status, true, preview_text(&bytes))),
+            Err(http::Error::InvalidUrl) => Err(self.invalid_url()),
+            Err(transport) => {
+                lgwks_std::trace::debug!(%transport, "poll: the endpoint is unreachable");
+                Ok(NetState::new(0, false, String::new()))
             }
-        })?;
-        let exchange = request.await;
-        match exchange {
-            Ok(response) => Ok(NetState::new(
-                response.status,
-                true,
-                response
-                    .text_lossy()
-                    .chars()
-                    .take(BODY_PREVIEW)
-                    .collect::<String>(),
-            )),
-            Err(http::Error::InvalidUrl) => Err(BotError::DomainError {
-                domain: self.domain_id().into(),
-                certainty: DispatchCertainty::Refused,
-                cause: "invalid endpoint URL (absolute http(s) URI required)".into(),
-            }),
-            Err(_) => Ok(NetState::new(0, false, String::new())),
         }
     }
 
     fn domain_id(&self) -> &str {
-        "net::endpoint"
+        ENDPOINT
     }
 }
 
 impl verb::Query for Endpoint {
     type Input = ();
+    type Output = Vec<json::Value>;
+
+    fn required_caps(&self) -> &[Cap] {
+        &self.caps
+    }
+
+    /// Every item of the endpoint's JSON-array listing, across its
+    /// `Link: rel="next"` pages, in server order; a walk past its page or item
+    /// ceiling is refused whole rather than handed back as a prefix.
+    async fn query(&self, call: (Auth, &())) -> Result<Vec<json::Value>, BotError> {
+        call.0.check(verb::Query::required_caps(self))?;
+        let pooled = self.pooled()?;
+        let url = self.url.clone();
+        match self
+            .blocking(move || client::listing(&pooled, &url))
+            .await?
+        {
+            Ok(items) => Ok(items),
+            Err(Paginate::Fetch(client::Listing::Http(http::Error::InvalidUrl))) => {
+                Err(self.invalid_url())
+            }
+            Err(refused @ Paginate::LimitExceeded { .. }) => {
+                Err(self.refusal(DispatchCertainty::Refused, refused.to_string()))
+            }
+            Err(failed) => Err(self.refusal(DispatchCertainty::NotDelivered, failed.to_string())),
+        }
+    }
+
+    fn domain_id(&self) -> &str {
+        ENDPOINT
+    }
+}
+
+impl verb::Execute for Endpoint {
+    /// The content type and the body posted.
+    type Input = (String, Vec<u8>);
     type Output = NetState;
 
     fn required_caps(&self) -> &[Cap] {
         &self.caps
     }
 
-    async fn query(&self, call: (Auth, &())) -> Result<NetState, BotError> {
-        let (auth, _) = call;
-        verb::Observe::poll(self, (auth, ())).await
+    /// POST the body and report the reply's status and preview. A transport
+    /// failure after the request may have left is `Unsettled`: the receiver
+    /// may hold the post, and saying it did not would invite a duplicate.
+    async fn execute_action(&self, call: (Auth, &(String, Vec<u8>))) -> Result<NetState, BotError> {
+        call.0.check(verb::Execute::required_caps(self))?;
+        let pooled = self.pooled()?;
+        let url = self.url.clone();
+        let (content_type, body) = call.1.clone();
+        let posted = self
+            .blocking(move || client::post(&pooled, &url, &content_type, &body))
+            .await?;
+        match posted {
+            Ok(reply) => Ok(NetState::new(
+                reply.status,
+                true,
+                preview_text(reply.body()),
+            )),
+            Err(http::Error::InvalidUrl) => Err(self.invalid_url()),
+            Err(transport) => Err(self.refusal(
+                DispatchCertainty::Unsettled,
+                format!("the post may not have reached the endpoint: {transport}"),
+            )),
+        }
     }
 
     fn domain_id(&self) -> &str {
-        "net::endpoint"
+        ENDPOINT
     }
 }
 

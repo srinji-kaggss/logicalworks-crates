@@ -1,0 +1,33 @@
+# One owner per check (#695): every gate in this estate has exactly one
+# implementation, named here. The file is the rule; the binary beside it is a
+# thin shim over the same file's entry; the consumer calls the rule as a
+# library. A second file implementing a check's entry fails the
+# `gate_ownership` integration test of `lgwks_deps`, so the rules exist once
+# and the two repositories' docs name the same implementation.
+#
+# `consumer` is intent, not a machine fact: it names the gate outside this
+# repository that calls the entry as a library. Everything else in a row is
+# checked: the file exists, the entry is defined in exactly the files the rows
+# naming it give (no second implementation anywhere under
+# `crates/lgwks-deps/src`), and the binary is a declared `[[bin]]` target.
+
+[[gate]]
+check = "doc-citations"
+file = "crates/lgwks-deps/src/doc_citations.rs"
+entry = "execute"
+binary = "check-doc-citations"
+consumer = "logical_ci docs-refs gate, as a library call"
+
+[[gate]]
+check = "requirements"
+file = "crates/lgwks-deps/src/requirements.rs"
+entry = "execute"
+binary = "check-requirements"
+consumer = "logical_ci governance gate, as a library call"
+
+[[gate]]
+check = "spec-owners"
+file = "crates/lgwks-deps/src/spec_owners.rs"
+entry = "execute"
+binary = "check-spec-owners"
+consumer = "logical_ci governance gate, as a library call"

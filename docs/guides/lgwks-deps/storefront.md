@@ -24,6 +24,9 @@ by the gate as second edges. Every feature is off by default.
 | `bevy-state` | `lgwks_deps::bevy_state` | Bevy state runtime, layered on `bevy-ecs`. For `States` derives, alias `lgwks_deps::bevy_state` as `bevy_state` at the consumer crate root; the upstream derive resolves that manifest crate name. |
 | `gpui` | `lgwks_deps::gpui` | Zed's GPU desktop UI framework, retaining its normal platform renderer. macOS builds require a usable Xcode Metal toolchain (`metal` and `metallib`); Linux builds require the platform development stack GPUI selects. External consumer checks run on Linux, macOS, and Windows. |
 | `appcui` | `lgwks_deps::appcui` | Native terminal UI. Downstream code uses `use lgwks_deps::appcui; use appcui::prelude::*;` so upstream macros resolve their crate alias without a direct dependency. |
+| `axum` | `lgwks_deps::axum` | Day-0 HTTP routing for the revenue slice: Tower-compatible routing with the http1, tokio, json and tracing stack. |
+| `tower-http` | `lgwks_deps::tower_http` | Day-0 HTTP middleware: cors, trace and gzip/deflate compression layers. |
+| `llm-guard` | `lgwks_deps::llm_guard` | Day-0 AI input guard: pure-Rust scanners with the fuzzy scanner only and no model download. |
 | `ml-candle` | `candle_core`, `candle_nn`, `candle_transformers` | ML inference: tensor compute and transformer models. |
 | `ml-candle-metal` | as `ml-candle`, plus Candle's macOS Metal backend | macOS-only. |
 | `ml-tokenizers` | `lgwks_deps::tokenizers` | The matching tokenizer stack. |

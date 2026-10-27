@@ -124,6 +124,14 @@ USAGE
                                         to the shared vendor tree
    lgwks-deps debug [PATH]              run the cargo-doctor-style debugger
              [--json]                   emit the doctor report as JSON
+   lgwks-deps sqlite <PATH> [TARGET [SQL ...]]
+                                        open PATH with the estate defaults and report user_version, journal_mode, synchronous,
+                                        busy_timeout_ms and tables; with TARGET, migrate then report
+   `sqlite` exits 2 on a refused invocation and 1 on an engine refusal.
+   lgwks-deps gate [PATH]               run the consumer gate: admission, citations,
+               [--json]                   requirements, owners, script check, clippy
+               [--ast BIN]                and the architecture diff, in order, with one
+               [--base REF|DIR]           summary and one exit code
 
 EXIT
    0  every authored external edge has an admitted semantic owner
@@ -474,6 +482,11 @@ fn dispatch(
         Some("vendor") => handle_vendor(&args[1..], out, err),
         Some("scan") => handle_scan_moved(err),
         Some("debug") => handle_debug(&args[1..], out, err),
+        #[cfg(feature = "sqlite")]
+        Some("sqlite") => handle_sqlite(&args[1..], out, err),
+        #[cfg(not(feature = "sqlite"))]
+        Some("sqlite") => handle_sqlite_disabled(err),
+        Some("gate") => handle_gate(&args[1..], out, err),
         Some("-h" | "--help" | "help") => handle_help(out),
         other => handle_unknown(other, err),
     }
@@ -694,6 +707,7 @@ macro_rules! unwrap_or_refuse {
 mod check_report;
 mod debug_cmd;
 mod freshness_cmd;
+mod gate_cmd;
 mod request_cmd;
 
 use check_report::{
@@ -702,6 +716,7 @@ use check_report::{
 };
 use debug_cmd::handle_debug;
 use freshness_cmd::handle_freshness;
+use gate_cmd::handle_gate;
 use request_cmd::{run_init, run_request};
 
 /// Resolves a repository root into the command's string-refusal vocabulary.
@@ -854,6 +869,64 @@ fn run_vendor_check(
         }
         Err(error) => refuse(&error.to_string(), err),
     }
+}
+
+// ── sqlite ──────────────────────────────────────────────────────────────────
+
+/// Opens the store with the estate's defaults, migrates it when asked, and
+/// reports what was opened.
+///
+/// A refused invocation prints the reason and the usage block and exits 2
+/// without touching the filesystem. An engine refusal names what the engine
+/// said and exits 1: the invocation was understood, and the store answered.
+#[cfg(feature = "sqlite")]
+fn handle_sqlite(
+    args: &[String],
+    out: &mut impl io::Write,
+    err: &mut impl io::Write,
+) -> io::Result<ExitCode> {
+    let request = match lgwks_deps::sqlite::cli::parse_sqlite_args(args) {
+        Ok(request) => request,
+        Err(error) => {
+            writeln!(err, "lgwks-deps: {error}\n")?;
+            write!(err, "{USAGE}")?;
+            return Ok(ExitCode::from(2));
+        }
+    };
+    let lgwks_deps::sqlite::cli::SqliteRequest::Run(parsed) = request else {
+        return handle_help(out);
+    };
+    let connection = match lgwks_deps::sqlite::open(parsed.path()) {
+        Ok(connection) => connection,
+        Err(error) => {
+            writeln!(err, "lgwks-deps: {error}")?;
+            return Ok(ExitCode::from(1));
+        }
+    };
+    if let Some(target) = parsed.target() {
+        let batches: Vec<&str> = parsed.migrations().iter().map(String::as_str).collect();
+        if let Err(error) = lgwks_deps::sqlite::migrate(&connection, target, &batches) {
+            writeln!(err, "lgwks-deps: {error}")?;
+            return Ok(ExitCode::from(1));
+        }
+    }
+    match lgwks_deps::sqlite::cli::report(&connection, out) {
+        Ok(()) => Ok(ExitCode::SUCCESS),
+        Err(error) => {
+            writeln!(err, "lgwks-deps: {error}")?;
+            Ok(ExitCode::from(1))
+        }
+    }
+}
+
+/// Tells a build without the `sqlite` feature how to get the `sqlite` command.
+#[cfg(not(feature = "sqlite"))]
+fn handle_sqlite_disabled(err: &mut impl io::Write) -> io::Result<ExitCode> {
+    writeln!(
+        err,
+        "lgwks-deps: `sqlite` needs the `sqlite` feature: rebuild with --features sqlite"
+    )?;
+    Ok(ExitCode::from(2))
 }
 
 // ── Ladder text ─────────────────────────────────────────────────────────────

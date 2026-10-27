@@ -23,31 +23,43 @@
 //! The chain head is over the record's own fields, so one file holds one
 //! chain and the tenant check on reads is what keeps tenants separated.
 //!
-//! # Durability without SQLite
+//! # Durability with SQLite's properties, without SQLite
 //!
-//! `rusqlite` is not on the estate's approved register, so no SQLite edge is
-//! taken here. The three properties `logical_ci` relies on are reproduced
-//! without it:
+//! The three properties `logical_ci` relies on are reproduced here, each
+//! owned by the mechanism the platform releases rather than by a guess about
+//! liveness:
 //!
 //! - **Write-ahead.** Every mutation is one framed record appended to
 //!   `tenant.store` and `sync_all`'d before the call returns, so a commit
 //!   survives power loss (`synchronous = FULL` in SQLite terms). A torn final
 //!   frame is an interrupted append and is trimmed on the next open or refresh;
 //!   every earlier frame is retained.
-//! - **One writer at a time.** Coordinators on one host serialize through a
-//!   `tenant.lock` file beside the store, held across exactly one
-//!   refresh-apply-sync step. A holder that died mid-step leaves a stale lock,
-//!   which the next acquirer steals once it outlives any live step — two
-//!   minutes; a live step is one small write and one sync, so it never runs
-//!   that long. Waiting for the lock past the busy timeout is a typed
+//! - **One writer at a time, readers beside it.** Coordinators on one host
+//!   serialize through a `tenant.lock` file beside the store, held across
+//!   exactly one refresh-apply-sync step — writers under the file's exclusive
+//!   lock, readers under its shared lock. The lock is the operating system's:
+//!   the kernel releases it when its holder dies, so a slow holder never loses
+//!   a lock it still holds and a dead one never keeps a lock it cannot release.
+//!   There is no lock file to steal by age, and no second holder ever writes.
+//!   Waiting for the lock past the busy timeout is a typed
 //!   [`TenantStoreError::Busy`] refusal, which is the `busy_timeout`
 //!   behaviour: a caller waits, then is told, and nothing is half-written.
+//! - **Open replays the tail, not the history.** A `tenant.snapshot` beside
+//!   the store carries the folded index and the file length it accounts for,
+//!   rewritten every few hundred frames and by an open that finds it stale.
+//!   An open loads the snapshot and drains only what was appended after it; a
+//!   missing or damaged snapshot falls back to the full replay it replaces,
+//!   because the store file stays the truth and the snapshot only the shortcut.
 //! - **Crash windows behave like the SQLite store.** A frame complete on disk
 //!   whose writer died before acknowledging it is folded on the next refresh,
 //!   and a retried mutation then meets the same refusal a retried SQLite
 //!   statement meets (a second begin is refused, a second dispatch finds no
 //!   pending row). An acknowledged commit was synced before it was
 //!   acknowledged, so recovery never takes back an answer.
+//!
+//! The estate's SQLite storefront (issue #696) is the durable answer for new
+//! state; this file stays the keyed run history `logical_ci` reads through,
+//! now with the same locking and replay shape.
 //!
 //! # The record vocabulary
 //!
@@ -89,8 +101,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 use lgwks_std::hash::Digest;
+use lgwks_std::json::{Deserialize, Serialize};
 
-use crate::journal::frame::SaturatingFrom;
 use crate::journal::owner::lock;
 
 /// The byte width of the store file's header: the magic and the version.
@@ -130,17 +142,28 @@ const BUSY_WAIT: Duration = Duration::from_secs(60);
 /// Small enough to pick that one up promptly, large enough not to spin.
 const LOCK_SLICE_MS: u128 = 5;
 
-/// How old a lock file must be before the next acquirer treats its holder as
-/// dead and steals it. A live holder keeps the lock for one small write and
-/// one sync, so a lock older than this was orphaned by a crash, never by a
-/// slow disk.
-const STALE_LOCK_AFTER: Duration = Duration::from_secs(120);
-
 /// The store file's name inside the state directory.
 const STORE_FILE: &str = "tenant.store";
 
 /// The lock file's name beside it.
 const LOCK_FILE: &str = "tenant.lock";
+
+/// The snapshot's name beside them: the folded index and the file length it
+/// accounts for, so an open drains only what was appended after it.
+const SNAPSHOT_FILE: &str = "tenant.snapshot";
+
+/// The temporary name a snapshot is written under before it is renamed: a
+/// crash leaves the previous snapshot or none, never a torn one.
+const SNAPSHOT_TMP: &str = "tenant.snapshot.tmp";
+
+/// The snapshot format this build writes and reads.
+const SNAPSHOT_FORMAT: u8 = 1;
+
+/// How many frames past the snapshot a mutation may commit before the next
+/// transact — or an open that finds it stale — rewrites it. An open then
+/// drains at most this many frames, so its cost is bounded by live history
+/// rather than by every run the store ever held.
+const SNAPSHOT_INTERVAL_FRAMES: u64 = 256;
 
 /// The record kinds this file holds, as stored in [`Stored::kind`].
 ///
@@ -195,7 +218,7 @@ const LANE_ENDED: &str = "ended";
 /// the handle: the authoritative answer is the one taken while holding it.
 #[derive(Clone)]
 pub struct TenantStore {
-    /// The shared file, index and holder counter.
+    /// The shared file, index and snapshot position.
     inner: Arc<StoreInner>,
 }
 
@@ -209,8 +232,10 @@ struct StoreInner {
     index: Mutex<Index>,
     /// How long a lock acquisition waits before it is refused as busy.
     busy_wait: Duration,
-    /// Whose lock file content names, disambiguated per store.
-    holder_seq: AtomicU64,
+    /// How many frames the last snapshot accounts for. A transact that moves
+    /// the index this far past it rewrites the snapshot under the same lock,
+    /// so an open never drains more than one interval of history.
+    snapshot_frames: AtomicU64,
 }
 
 /// The folded index, and the committed length it accounts for.
@@ -232,7 +257,11 @@ struct Index {
 }
 
 /// One tenant's policy as folded.
-#[derive(Debug, Clone)]
+///
+/// Archived into the snapshot beside the store, so an open reads back the
+/// same policy it would have folded frame by frame.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
 struct StoredPolicy {
     /// The gate set, exactly as recorded.
     gates_json: String,
@@ -243,7 +272,10 @@ struct StoredPolicy {
 }
 
 /// How a folded run closed, in the same shape [`RunClose`] reports.
-#[derive(Debug, Clone)]
+///
+/// Archived into the snapshot beside the store, like the run that carries it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
 struct StoredClose {
     /// When the run finished.
     finished_at: String,
@@ -282,7 +314,11 @@ impl StoredClose {
 }
 
 /// One run as folded, with its lanes in plan order.
-#[derive(Debug, Clone)]
+///
+/// Archived into the snapshot beside the store, so an open reads back the
+/// same runs its frames would have folded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
 struct RunEntry {
     /// The tenant that owns the run.
     tenant: String,
@@ -305,7 +341,10 @@ struct RunEntry {
 }
 
 /// One lane as folded.
-#[derive(Debug, Clone)]
+///
+/// Archived into the snapshot beside the store, like the run that carries it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(crate = "lgwks_std::json::serde")]
 struct LaneEntry {
     /// The lane id from the plan.
     id: String,
@@ -334,23 +373,27 @@ impl fmt::Debug for TenantStore {
     }
 }
 
-/// The lock file held across one refresh-apply-sync step.
+/// The operating-system lock held across one refresh-apply-sync step.
 ///
-/// RAII on purpose: the step either completes and releases, or its holder died
-/// and the file's age says so. Removing on drop is best effort — a removal the
-/// device refuses is reported by the next acquirer's staleness check rather
-/// than lost.
+/// The guard owns the open lock file, so the kernel holds the lock while the
+/// guard lives and releases it when the guard drops — including when its
+/// holder dies, which is what makes a stale lock impossible rather than merely
+/// unlikely. Nothing is removed, stolen, or judged by age: the claim itself,
+/// not a timestamp beside it, decides who holds the file.
 struct LockGuard {
-    /// The lock file to remove on release.
-    path: PathBuf,
+    /// The open lock file keeping the advisory lock. Held, never written:
+    /// its bytes were the stale-lock protocol's, and the protocol is gone.
+    _file: File,
 }
 
 impl Drop for LockGuard {
-    /// Release the lock: remove the file, then wake this process's waiters.
-    /// The removal is best effort, because `Drop` cannot report, and a leftover
-    /// file is diagnosed by age at the next acquire.
+    /// Release the lock by unlocking and closing the file, then wake this
+    /// process's waiters. Unlocking releases the advisory lock on every
+    /// platform this store builds for — including when the holder died, whose
+    /// close the kernel already ran — and the wake only hurries waiters in
+    /// this process; a waiter in another process notices on its next attempt.
     fn drop(&mut self) {
-        drop(std::fs::remove_file(&self.path));
+        drop(self._file.unlock());
         let mut generation = lock(&RELEASES.generation);
         *generation = generation.wrapping_add(1);
         RELEASES.released.notify_all();
@@ -517,62 +560,44 @@ fn lock_index(index: &Mutex<Index>) -> MutexGuard<'_, Index> {
     }
 }
 
-/// Nanos since the epoch for diagnostic labels: the lock file's holder name
-/// and the doc-test nonce.
+/// Open-or-create `path`, writing `header` when new or empty.
 ///
-/// A label, never a decision and never an identity: the lock's existence is
-/// the mutex and its mtime is the staleness, so a reused timestamp degrades
-/// forensics, never fencing — which is why this is the wall clock rather
-/// than a process id the OS reuses. A clock before the epoch labels zero
-/// rather than refusing to label: the label answers "which claim", and a
-/// missing answer would be evidence of nothing.
-fn now_nanos() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(since) => u64::saturating_from(since.as_nanos()),
-        Err(_) => 0,
+/// One definition for every file in this store that begins with a magic
+/// header: the open leaves an existing file's contents alone, and an empty
+/// file gets exactly the header the caller names. `File::options` states the
+/// same open through the handle that owns it, so this spelling does not
+/// repeat the repair ledger's while it shares its contract; migrating that
+/// ledger to this helper is a follow-up outside this cluster.
+///
+/// # Errors
+///
+/// Whatever the device refuses.
+pub(super) fn open_header_file(path: &Path, header: &[u8]) -> Result<File, std::io::Error> {
+    use std::io::Write;
+    let existed = path.exists();
+    let mut file = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    if !existed || file.metadata()?.len() == 0 {
+        file.write_all(header)?;
+        file.sync_all()?;
     }
+    Ok(file)
 }
 
-/// Whether the lock file's holder is dead: the file is older than a live
-/// holder can ever be.
-///
-/// A lock file that vanishes between the failed claim and this check was
-/// released, not orphaned: it reads as held, and the acquirer parks one slice
-/// and retries rather than reporting the vanished file as a device refusal.
-/// A device refusal stays a refusal rather than a guess, and a clock that
-/// cannot report the file's age — the host's clock runs before the file's
-/// timestamp — is read as a live holder, so the acquirer waits out the busy
-/// timeout and is refused [`Busy`](TenantStoreError::Busy) rather than
-/// stealing a lock that may be held. Stealing what may be live would fork the
-/// file; waiting only costs the bound.
-fn lock_is_stale(path: &Path) -> Result<bool, TenantStoreError> {
-    let modified = match std::fs::metadata(path).and_then(|meta| meta.modified()) {
-        Ok(modified) => modified,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            lgwks_std::trace::warn!(
-                path = %path.display(),
-                %error,
-                "tenant_store: lock age unreadable; refusing rather than guessing stale"
-            );
-            return Err(TenantStoreError::storage(error));
-        }
-    };
-    match modified.elapsed() {
-        Ok(age) => Ok(age > STALE_LOCK_AFTER),
-        Err(_) => Ok(false),
-    }
-}
-
-// The refusal vocabulary, the caller's rows, the operations and the record
-// codec, each in its own file; re-exported so every path stays
-// `tenant_store::<Name>`.
+// The refusal vocabulary, the caller's rows, the operations, the record
+// codec and the snapshot, each in its own file; re-exported so every path
+// stays `tenant_store::<Name>`.
 mod error;
 mod record;
 mod rows;
-// The operations: every record is a wire frame, so without `wire` there is
-// nothing to open, read or write (#687).
+// The operations and the snapshot they open from: every record is a wire
+// frame, so without `wire` there is nothing to open, read or write (#687).
+#[cfg(feature = "wire")]
+mod snapshot;
 #[cfg(feature = "wire")]
 mod store;
 

@@ -55,6 +55,50 @@ fn moment(seq_no: usize) -> String {
     format!("t-{seq_no:06}")
 }
 
+/// Open a scratch store with the acme fmt policy and one begun run.
+fn begun_store(
+    tag: &str,
+    run: &str,
+    lanes: &[&str],
+    pid: u32,
+    lock: &str,
+    moment: &str,
+) -> Result<(Scratch, TenantStore), Box<dyn Error>> {
+    let scratch = Scratch::new(tag)?;
+    let store = TenantStore::open(scratch.path())?;
+    store.init_policy("acme", "[\"fmt\"]", 1, "2026-10-07T00:00:00Z")?;
+    store.begin_run(
+        &RunStart::new(run, "acme", "/repo", "host", pid, lock, moment),
+        lanes,
+    )?;
+    Ok((scratch, store))
+}
+
+/// One begun run on an open store.
+fn begin_simple(
+    store: &TenantStore,
+    run: &str,
+    lanes: &[&str],
+    pid: u32,
+    lock: &str,
+    moment: &str,
+) -> TestResult {
+    store.begin_run(
+        &RunStart::new(run, "acme", "/repo", "host", pid, lock, moment),
+        lanes,
+    )?;
+    Ok(())
+}
+
+/// Many begun runs, `count` of them from `from`, each with one lane.
+fn begin_many(store: &TenantStore, prefix: &str, from: usize, count: usize) -> TestResult {
+    for seq in from..from.saturating_add(count) {
+        let run = format!("{prefix}-{seq:03}");
+        begin_simple(store, &run, &["only"], 1, "lock", &moment(seq))?;
+    }
+    Ok(())
+}
+
 /// One tenant's whole lifecycle: policy, begin, both dispatches, both ends,
 /// and the sealed finish.
 fn tenant_lifecycle(store: &TenantStore, tenant_no: usize) -> Result<(), String> {
@@ -161,24 +205,17 @@ fn a_hundred_tenants_coordinate_on_one_host() -> TestResult {
 /// rather than a pass, and the first closer's record stands.
 #[test]
 fn a_killed_coordinator_is_reconciled() -> TestResult {
-    let scratch = Scratch::new("tenant-store-kill")?;
-    let dir = scratch.path();
     let run = "run-kill-001";
+    let (scratch, store) = begun_store(
+        "tenant-store-kill",
+        run,
+        &LANES,
+        4242,
+        "run-kill-001.lock",
+        "t-000001",
+    )?;
+    let dir = scratch.path();
     {
-        let store = TenantStore::open(dir)?;
-        store.init_policy("acme", "[\"fmt\"]", 1, "2026-10-07T00:00:00Z")?;
-        store.begin_run(
-            &RunStart::new(
-                run,
-                "acme",
-                "/repo",
-                "host",
-                4242,
-                "run-kill-001.lock",
-                "t-000001",
-            ),
-            &LANES,
-        )?;
         store.lane_dispatched(run, 0)?;
         assert_eq!(
             store.coordinator_lock(run)?,
@@ -186,6 +223,7 @@ fn a_killed_coordinator_is_reconciled() -> TestResult {
             "the successor must find the dead coordinator's lock name"
         );
     }
+    drop(store);
     let store = TenantStore::open(dir)?;
     let open = store.open_runs("host")?;
     assert_eq!(open.len(), 1, "the killed run must reopen as open");
@@ -425,12 +463,21 @@ fn a_cut_append_is_trimmed_and_kept_frames_survive() -> TestResult {
 }
 
 /// A lock held past the bound is a typed busy refusal, and the store opens
-/// once the lock is gone: contention waits, then tells.
+/// once the lock is gone: contention waits, then tells. The lock is the
+/// operating system's, so the holder here is a real advisory lock taken the
+/// way another coordinator takes it — a stale file with bytes in it holds
+/// nothing and never blocks an open.
 #[test]
 fn a_held_lock_is_a_busy_refusal() -> TestResult {
     let scratch = Scratch::new("tenant-store-busy")?;
     let dir = scratch.path();
-    std::fs::write(dir.join("tenant.lock"), b"someone-else")?;
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join("tenant.lock"))?;
+    lock.try_lock()?;
     let waited = match TenantStore::open_with_busy_timeout(dir, Duration::from_millis(120)) {
         Err(TenantStoreError::Busy { waited }) => waited,
         Err(other) => return Err(format!("a held lock must be Busy, got {other}").into()),
@@ -440,7 +487,7 @@ fn a_held_lock_is_a_busy_refusal() -> TestResult {
         waited >= Duration::from_millis(120),
         "the busy refusal must come after the bound, not before it"
     );
-    std::fs::remove_file(dir.join("tenant.lock"))?;
+    drop(lock);
     TenantStore::open(dir)?;
     Ok(())
 }
@@ -528,10 +575,7 @@ fn listings_cap_at_two_hundred_newest_first() -> TestResult {
     let store = TenantStore::open(scratch.path())?;
     for seq_no in 0..205 {
         let run = format!("run-cap-{seq_no:03}");
-        store.begin_run(
-            &RunStart::new(&run, "acme", "/repo", "host", 1, "lock", &moment(seq_no)),
-            &["only"],
-        )?;
+        begin_simple(&store, &run, &["only"], 1, "lock", &moment(seq_no))?;
     }
     let rows = store.runs("acme", 5_000)?;
     assert_eq!(rows.len(), 200, "the listing must cap at 200");
@@ -547,5 +591,85 @@ fn listings_cap_at_two_hundred_newest_first() -> TestResult {
     );
     let two = store.runs("acme", 2)?;
     assert_eq!(two.len(), 2, "a smaller limit must be honored");
+    Ok(())
+}
+
+/// An interval of frames writes the snapshot: past 256 frames the store
+/// carries the history forward, a reopen drains only the tail, and rows read back.
+#[test]
+fn an_interval_of_frames_writes_the_snapshot() -> TestResult {
+    let (scratch, store) = begun_store(
+        "tenant-store-compact",
+        "run-compact-000",
+        &["only"],
+        1,
+        "lock",
+        &moment(0),
+    )?;
+    let dir = scratch.path();
+    begin_many(&store, "run-compact", 1, 259)?;
+    assert!(
+        dir.join("tenant.snapshot").exists(),
+        "an interval of frames must write the snapshot"
+    );
+    begin_simple(
+        &store,
+        "run-compact-tail",
+        &["only"],
+        1,
+        "lock",
+        &moment(999),
+    )?;
+    drop(store);
+    let store = TenantStore::open(dir)?;
+    assert_eq!(
+        store.lanes("run-compact-000")?.len(),
+        1,
+        "run-compact-000 must survive the snapshot open"
+    );
+    assert_eq!(
+        store.lanes("run-compact-tail")?.len(),
+        1,
+        "a frame after the snapshot must drain on open"
+    );
+    let policy = store
+        .policy("acme")?
+        .ok_or_else(|| "the policy must survive the snapshot open".to_owned())?;
+    assert_eq!(
+        policy.gates_json(),
+        "[\"fmt\"]",
+        "the policy must survive the snapshot open"
+    );
+    Ok(())
+}
+
+/// A damaged snapshot costs the next open its shortcut, never its history:
+/// the store file stays the truth and the open falls back to the full replay.
+#[test]
+fn a_damaged_snapshot_falls_back_to_the_full_replay() -> TestResult {
+    let (scratch, store) = begun_store(
+        "tenant-store-snap-rot",
+        "run-rot-001",
+        &["only"],
+        1,
+        "lock",
+        "t-000001",
+    )?;
+    let dir = scratch.path();
+    drop(store);
+    std::fs::write(dir.join("tenant.snapshot"), b"rot, not a snapshot")?;
+    let store = TenantStore::open(dir)?;
+    assert_eq!(
+        store.lanes("run-rot-001")?.len(),
+        1,
+        "the rot must not take the acknowledged run with it"
+    );
+    drop(store);
+    let store = TenantStore::open(dir)?;
+    assert_eq!(
+        store.lanes("run-rot-001")?.len(),
+        1,
+        "a compaction over the rot must heal the shortcut"
+    );
     Ok(())
 }
