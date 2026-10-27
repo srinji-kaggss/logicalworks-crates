@@ -314,10 +314,12 @@ impl Handle {
 /// second driver on a thread a runtime already drives, because blocking that
 /// thread would stall every task the outer runtime has parked on it. Both read
 /// the answer here, so the driver is named once rather than at every refusal.
+#[cfg(any(feature = "ecs", feature = "script"))]
 pub(crate) fn inside_runtime() -> bool {
     lgwks_deps::tokio::runtime::Handle::try_current().is_ok()
 }
 
+#[cfg(feature = "ecs")]
 impl crate::ecs::EcsBot {
     /// Whether the driver already drives the calling thread, asked by
     /// `EcsBot::tick` before it parks the thread. Answered here because the

@@ -27,7 +27,7 @@
 //! minted from a grant that named a lifetime lapses once that lifetime has
 //! passed, but the lifetime is fixed at the mint and a bot mints afresh on
 //! every call, so it bounds a proof in hand rather than a running bot. Narrowing
-//! a running bot is one operation: [`Bot::replace_grants`](crate::Bot::replace_grants)
+//! a running bot is one operation: `Bot::replace_grants` (under `ecs`)
 //! swaps the retained set between ticks, atomically with respect to them, and
 //! reports the capabilities it withdrew — which the next tick's calls are denied
 //! for. Replacing the caller's set is still not that operation, and the boundary
@@ -54,9 +54,12 @@
 //! |---|---|---|
 //! | `rt` | on | the orchestration runtime surface, driven by the `lgwks_deps` driver |
 //! | `time`, `sync`, `macros` | on | the matching runtime drivers; each implies `rt` |
-//! | `script` | on | `script!` and the `script` module; implies `rt`, `time`, `sync` and `macros` |
+//! | `script` | on | `script!` and the `script` module; implies `rt`, `time`, `sync`, `macros` and `wire` |
+//! | `ecs` | on | the `bevy_ecs` substrate `Bot` executes on; opt out with `--no-default-features` for a process-only build |
+//! | `trace` | on | the tracing facade; the installer lives in `lgwks_std/trace-install` |
+//! | `wire`, `ron` | on | the wire encoding and the RON document notation the journal and the session persist |
 //! | `io` | off | reader and writer traits; implies `rt` |
-//! | `net`, `fs` | off | sockets, files; each implies `io` (`net` also `lgwks_std/random`) |
+//! | `net`, `fs` | off | sockets, files; each implies `io` (`net` also `lgwks_std/random` and `lgwks_std/http`) |
 //! | `process` | off | supervised child processes; implies `io`, `sync` and `time` |
 //! | `signal` | off | OS signals; implies `rt` |
 //! | `inspect` | off | structural code inspection through `lgwks_ast` (host only) |
@@ -194,6 +197,9 @@ pub mod domain {
     /// [`Host`](crate::task::Host) can run.
     #[cfg(feature = "inspect")]
     pub mod inspect;
+    /// The network Observe domain, behind `net` like the HTTP exchange it polls
+    /// through: a process-only build compiles no HTTP client (#687).
+    #[cfg(feature = "net")]
     pub mod net;
     pub mod notify;
     pub mod sys;
@@ -219,7 +225,9 @@ pub mod clock;
 #[doc(hidden)]
 pub mod dist_lease;
 /// The `bevy_ecs` substrate the verbs execute on. Private: it is the
-/// implementation, not a second way to run a bot.
+/// implementation, not a second way to run a bot. Its substrate submodules are
+/// gated behind `ecs` inside, so a process-only consumer never compiles them
+/// (#687); the pending-work vocabulary they report in is built everywhere.
 mod ecs;
 /// Durable effect identity: the exact key a settlement is a statement about.
 ///
@@ -246,6 +254,7 @@ pub mod frontier;
 #[doc(hidden)]
 pub mod gate;
 /// One effect per key: POST through a retrying proxy without sending twice.
+/// Behind `net` like the HTTP exchange it posts through (#687).
 ///
 /// [`IdempotentPost`](crate::idempotent::IdempotentPost) carries the
 /// caller-generated `Idempotency-Key` every attempt of one operation reuses,
@@ -253,6 +262,7 @@ pub mod gate;
 /// effect. Wired rather than offered: an upstream credential refusal on this
 /// path is the credential row's typed repair, and the row's tests stand a
 /// real duplicating proxy in front of the adapter (issue #278, row 6).
+#[cfg(feature = "net")]
 #[doc(hidden)]
 pub mod idempotent;
 /// Typed in-process structural code inspection (R8, feature `inspect`).
@@ -412,9 +422,9 @@ pub mod skew;
 /// The serializable spec contract, the materializer that walks one against a
 /// registry, and the builder that assembles bots.
 ///
-/// [`Bot::from_spec`] is the materializer: a [`BotSpec`] plus a
-/// [`DomainRegistry`] plus the caller's [`GrantSet`] produces a runnable
-/// [`Bot`] through the same `assemble`/`build` path a native bot uses, with no
+/// `Bot::from_spec` (under `ecs`) is the materializer: a [`BotSpec`] plus a
+/// `DomainRegistry` plus the caller's [`GrantSet`] produces a runnable
+/// `Bot` through the same `assemble`/`build` path a native bot uses, with no
 /// second interpreter and no second execution path. It is all-or-nothing: an
 /// unmet need is reported as a complete, attributed [`NeedSet`] and nothing is
 /// built, and admission validates a registry with a duplicate identifier rather
@@ -460,7 +470,9 @@ pub mod stability;
 #[doc(hidden)]
 pub mod task;
 /// The estate-owned durable keyed store behind multi-tenant run records:
-/// tenant policies, run rows and lane rows with per-tenant keyed reads.
+/// tenant policies, run rows and lane rows with per-tenant keyed reads. Every
+/// row persists through the wire encoding, so the store exists with `wire`.
+#[cfg(feature = "wire")]
 #[doc(hidden)]
 pub mod tenant_store;
 /// The four verbs: Observe, Evaluate, Execute, Query. No fifth verb exists.
@@ -470,6 +482,7 @@ pub mod verb;
 #[doc(hidden)]
 pub use cap::{Auth, Cap, Deficit, Demand, Shortage};
 #[doc(hidden)]
+#[cfg(feature = "ecs")]
 pub use ecs::{
     DEFAULT_POLL_DEADLINE, ForcedRefresh, MAX_POLL_DEADLINE, StalledSource, SupersededObservation,
     TickReport,
@@ -493,6 +506,7 @@ pub use error::{BotError, DispatchCertainty, RetryClass};
 pub use gate::GrantSet;
 #[doc(hidden)]
 pub use language::{Alias, LanguageResolver};
+#[cfg(any(feature = "ecs", feature = "script", feature = "inspect"))]
 #[doc(hidden)]
 pub use registry::{Action, ActionCtor, Condition, DomainRegistry, Source, SourceCtor};
 #[cfg(feature = "rt")]
@@ -511,8 +525,12 @@ pub use session::{
     TemplateInterpolator, TemplatePart, Terminal, TranscriptEntry, Value, ValueExpr, VarScope,
     VarType, Verdict,
 };
+/// The live bot itself, behind `ecs` like the substrate it executes on.
+#[cfg(feature = "ecs")]
 #[doc(hidden)]
-pub use spec::{Admission, Bot, BotSpec, Need, NeedSet};
+pub use spec::Bot;
+#[doc(hidden)]
+pub use spec::{Admission, BotSpec, Need, NeedSet};
 
 /// Write orchestration as indented blocks that expand to bounded,
 /// deadline-carrying, tenant-keyed flows over [`script`](mod@script), plus an

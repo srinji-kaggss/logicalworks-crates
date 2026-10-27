@@ -9,7 +9,7 @@
 //! transport for at most the byte ceiling it declares and keeps the prefix it
 //! gets, so a server cannot make a probe allocate by sending a large body. The
 //! ceiling and the preview are two numbers for one purpose, so the preview is
-//! derived from [`BODY_PREVIEW`] rather than written down twice.
+//! derived from [`BODY_PREVIEW`](crate::domain::net::BODY_PREVIEW) rather than written down twice.
 
 use std::time::Duration;
 
@@ -73,7 +73,8 @@ pub struct NetState {
     reachable: bool,
     /// Response body, truncated to [`BODY_PREVIEW`] characters for observation.
     ///
-    /// Read under the transport's byte ceiling, derived from [`BODY_PREVIEW`],
+    /// Read under the transport's byte ceiling, derived from
+    /// [`BODY_PREVIEW`](crate::domain::net::BODY_PREVIEW),
     /// and decoded lossily, so a large or non-UTF-8 response still yields a
     /// bounded preview rather than failing the probe: a body worth watching is
     /// exactly the one too big to hold.
@@ -215,8 +216,11 @@ pub fn endpoint(url: impl Into<String>) -> Endpoint {
 mod tests {
     use super::*;
     use crate::gate::GrantSet;
+    use lgwks_std::task::spawn_blocking;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// Tests here mix three error domains (socket I/O, `BotError`, and the
     /// executor), so the tests report `Box<dyn Error>` and propagate each with
@@ -234,25 +238,31 @@ mod tests {
         GrantSet::empty().grant(Cap::net()).issue(&[Cap::net()])
     }
 
-    /// Serve exactly one HTTP request on an ephemeral loopback port.
+    /// Serve exactly one HTTP request on an ephemeral loopback port while
+    /// `client` runs against it, then join the server.
     ///
-    /// `lgwks_std::task::spawn_blocking` rather than a raw `std::thread::spawn`:
-    /// it starts the thread immediately, so the listener is accepting before
-    /// the client dials, and its handle is a future the caller must await,
-    /// which is the difference between a joined thread and a leaked one. The
-    /// closure returns its I/O failure instead of unwrapping it so a refused
-    /// connection surfaces as a test error rather than a background panic.
+    /// The server thread is spawned, cancelled and joined here, so no caller
+    /// can leak it. Cancellation is a wake dial: a client that never connected
+    /// (it failed before dialling) would leave `accept` blocked forever, so the
+    /// fixture dials its own port once, which ends the accept, and the join
+    /// returns. The closure returns its I/O failure instead of unwrapping it,
+    /// so a refused connection surfaces as a test error rather than a
+    /// background panic.
     ///
     /// The body is owned rather than a `&'static str`: the ceiling tests send
     /// bodies larger than the preview, which are built rather than written out.
-    fn serve_once(
+    fn serve_while<T>(
         body: impl Into<String>,
-    ) -> std::io::Result<(u16, lgwks_std::task::JoinHandle<std::io::Result<()>>)> {
+        client: impl FnOnce(u16) -> T,
+    ) -> std::io::Result<(T, std::io::Result<()>)> {
         let body = body.into();
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
-        let handle = lgwks_std::task::spawn_blocking(move || -> std::io::Result<()> {
+        let accepted = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&accepted);
+        let server = spawn_blocking(move || -> std::io::Result<()> {
             let (mut stream, _) = listener.accept()?;
+            seen.store(true, Ordering::Release);
             let mut request = vec![0u8; 1024];
             let mut head = Vec::new();
             loop {
@@ -268,7 +278,22 @@ mod tests {
             );
             stream.write_all(reply.as_bytes())
         });
-        Ok((port, handle))
+        let outcome = client(port);
+        if !accepted.load(Ordering::Acquire) {
+            // The cancellation: a refused wake dial means the server already
+            // returned, so there is nothing left to release.
+            drop(std::net::TcpStream::connect(("127.0.0.1", port)));
+        }
+        let served = lgwks_std::task::block_on(server);
+        Ok((outcome, served))
+    }
+
+    /// One observation of the loopback endpoint on `port`.
+    fn poll_port(port: u16) -> PollResult {
+        use crate::verb::Observe;
+        Ok(lgwks_std::task::block_on(
+            Endpoint::new(format!("http://127.0.0.1:{port}/")).poll((net_auth()?, ())),
+        )?)
     }
 
     /// Poll the loopback server serving `body`.
@@ -276,29 +301,22 @@ mod tests {
     /// One poll and a joined fixture per call, so a ceiling test reads as the
     /// body it serves and the state it produced.
     fn poll_body(body: impl Into<String>) -> PollResult {
-        use crate::verb::Observe;
-        let (port, server) = serve_once(body)?;
-        let state = lgwks_std::task::block_on(
-            Endpoint::new(format!("http://127.0.0.1:{port}/")).poll((net_auth()?, ())),
-        )?;
-        lgwks_std::task::block_on(server)?;
-        Ok(state)
+        let (state, served) = serve_while(body, poll_port)?;
+        served?;
+        state
     }
 
     #[test]
     fn poll_reports_reachable_loopback() -> TestResult {
-        use crate::verb::Observe;
-        let (port, server) = serve_once("alive")?;
-        let state = lgwks_std::task::block_on(
-            Endpoint::new(format!("http://127.0.0.1:{port}/")).poll((net_auth()?, ())),
-        )?;
+        let (state, served) = serve_while("alive", poll_port)?;
+        let state = state?;
+        served?;
         assert!(
             state.reachable(),
             "a loopback server that answered must report reachable"
         );
         assert_eq!(state.status_code(), 200);
         assert_eq!(state.body, "alive");
-        lgwks_std::task::block_on(server)?;
         Ok(())
     }
 
@@ -345,12 +363,9 @@ mod tests {
     /// alone cannot tell the fix from the defect.
     #[test]
     fn poll_stops_reading_at_its_preview_ceiling() -> TestResult {
-        use crate::verb::Observe;
         let payload = "x".repeat(BODY_PREVIEW_BYTES.saturating_mul(256));
-        let (port, server) = serve_once(payload)?;
-        let state = lgwks_std::task::block_on(
-            Endpoint::new(format!("http://127.0.0.1:{port}/")).poll((net_auth()?, ())),
-        )?;
+        let (state, served) = serve_while(payload, poll_port)?;
+        let state = state?;
         assert!(
             state.reachable(),
             "a server that answered with a huge body is reachable"
@@ -360,7 +375,6 @@ mod tests {
             BODY_PREVIEW,
             "the preview stops at BODY_PREVIEW characters"
         );
-        let served = lgwks_std::task::block_on(server);
         assert!(
             served.is_err(),
             "a 4 MiB body can only be written in full to a client that keeps reading, so a \

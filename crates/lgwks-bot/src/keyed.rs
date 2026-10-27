@@ -1,6 +1,6 @@
 //! One effect per caller key, on a receiver that keeps no idempotency key.
 //!
-//! [`idempotent`](crate::idempotent) covers a receiver that deduplicates on a
+//! `idempotent` covers a receiver that deduplicates on a
 //! key the caller sends. Most receivers do not: an issue tracker, a chat
 //! channel or a mail relay holds a second copy of anything sent twice. For
 //! them the key has to travel *inside* the effect (a hidden trailer, a

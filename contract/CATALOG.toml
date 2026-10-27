@@ -51,6 +51,16 @@ words = ["trace", "tracing", "logging", "log", "subscriber", "debug output", "pr
 replaces = ["println! in library code", "eprintln! in library code", "tracing::subscriber::set_global_default built by hand"]
 
 [[capability]]
+name = "trace install"
+path = "lgwks_std::trace::install"
+file = "crates/lgwks-std/src/trace.rs"
+crate = "lgwks_std"
+feature = "trace-install"
+default = "on"
+words = ["trace install", "subscriber install", "tracing subscriber", "global default"]
+replaces = ["tracing::subscriber::set_global_default built by hand"]
+
+[[capability]]
 name = "hex"
 path = "lgwks_std::hex"
 file = "crates/lgwks-std/src/hex.rs"
@@ -307,7 +317,7 @@ name = "ecs"
 path = "lgwks_bot::ecs"
 file = "crates/lgwks-bot/src/ecs.rs"
 crate = "lgwks_bot"
-feature = "always"
+feature = "ecs"
 default = "on"
 words = ["ecs", "schedule", "change detection", "tick", "observe evaluate execute"]
 replaces = ["a hand-rolled poll loop"]

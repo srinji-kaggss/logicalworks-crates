@@ -2,14 +2,17 @@
 
 use core::fmt;
 
+#[cfg(feature = "wire")]
 use lgwks_std::hash::{Digest, Hasher};
 
 use super::frame::SaturatingFrom;
 use super::{
-    ContinuationWatermark, DurabilityPromise, DurableAck, EffectEvent, EffectEvidence,
-    EffectJournal, EventKind, JournalEntry, JournalError, JournalLimitKind, JournalPosition,
-    MAX_JOURNAL_BYTES, MAX_JOURNAL_EVENTS, Recovered, recover,
+    ContinuationWatermark, DurabilityPromise, EffectEvent, EffectEvidence, EffectJournal,
+    JournalEntry, JournalError, JournalPosition, MAX_JOURNAL_BYTES, MAX_JOURNAL_EVENTS, Recovered,
+    recover,
 };
+#[cfg(feature = "wire")]
+use super::{DurableAck, EventKind, JournalLimitKind};
 use crate::effect::EffectKey;
 
 /// Where a recomputed chain stopped agreeing with what was recorded, or why it
@@ -97,6 +100,7 @@ impl std::error::Error for ChainBreak {}
 /// to content: the same two events in the other order produce a different head,
 /// which is what makes a reordered or dropped entry detectable rather than
 /// merely suspicious.
+#[cfg(feature = "wire")]
 pub(super) fn chain(
     previous: JournalPosition,
     event: &EffectEvent,
@@ -107,13 +111,14 @@ pub(super) fn chain(
     Ok(hasher.finalize())
 }
 
-/// [`chain`] over bytes the caller has already archived.
+/// `chain` over bytes the caller has already archived.
 ///
 /// The two-step split exists because the shared frame step archives an event once
 /// and then needs its head: calling [`chain`] there would encode the same value
 /// twice and hand the head a second chance to disagree with the bytes that were
 /// actually framed. Infallible, because the bytes are already in hand and nothing
 /// can fail.
+#[cfg(feature = "wire")]
 pub(crate) fn chain_over_bytes(previous: &Digest, payload: &[u8]) -> Digest {
     let mut hasher = Hasher::new();
     hasher.update(previous.as_bytes());
@@ -127,6 +132,7 @@ pub(crate) fn chain_over_bytes(previous: &Digest, payload: &[u8]) -> Digest {
 /// walk is what an index *means* rather than what an append *does*: the last
 /// kind recorded for the key names the next allowed one, and a key never
 /// seen is at the ladder's foot.
+#[cfg(feature = "wire")]
 pub(super) fn next_allowed_of(last: Option<EventKind>) -> Option<EventKind> {
     match last {
         Some(kind) => kind.next(),
@@ -147,6 +153,7 @@ pub(super) fn next_allowed_of(last: Option<EventKind>) -> Option<EventKind> {
 /// `JournalError::TailMismatch` when `expected_tail` is not `actual`, and
 /// `JournalError::OutOfOrder` when the event's kind is not the next one the
 /// ladder allows for its key.
+#[cfg(feature = "wire")]
 pub(super) fn check_append_order(
     expected_tail: JournalPosition,
     actual: JournalPosition,
@@ -181,6 +188,7 @@ pub(super) fn check_append_order(
 ///
 /// [`ChainBreak`] naming the first entry whose recorded position is not the one
 /// its events produce.
+#[cfg(feature = "wire")]
 pub fn verify_chain(entries: &[JournalEntry]) -> Result<JournalPosition, ChainBreak> {
     verify_chain_from(JournalPosition::genesis(), entries)
 }
@@ -198,6 +206,7 @@ pub fn verify_chain(entries: &[JournalEntry]) -> Result<JournalPosition, ChainBr
 ///
 /// [`ChainBreak`] naming the first entry whose recorded position is not the one
 /// its events produce.
+#[cfg(feature = "wire")]
 pub fn verify_chain_from(
     base: JournalPosition,
     entries: &[JournalEntry],
@@ -250,7 +259,9 @@ pub struct MemoryJournal {
     /// key's last event, and an append would cost the journal's own length:
     /// measured at 521 ns per append against an empty journal and 50,886 ns
     /// against 8,000 prior attempts, which is the O(n²) a long-lived bot
-    /// would grind against. The index makes the ladder check constant.
+    /// would grind against. The index makes the ladder check constant. Only an
+    /// append reads it, and appends chain through the wire encoding.
+    #[cfg(feature = "wire")]
     ladder: std::collections::HashMap<EffectKey, EventKind>,
     /// Latest durable outcome and its exact position per attempt.
     outcomes: std::collections::HashMap<EffectKey, (JournalPosition, EffectEvidence)>,
@@ -270,6 +281,7 @@ impl MemoryJournal {
     pub fn new() -> Self {
         Self {
             committed: Vec::new(),
+            #[cfg(feature = "wire")]
             ladder: std::collections::HashMap::new(),
             outcomes: std::collections::HashMap::new(),
             committed_bytes: 0,
@@ -295,6 +307,7 @@ impl MemoryJournal {
     /// # Errors
     ///
     /// [`ChainBreak`] when a recorded position does not follow from the events.
+    #[cfg(feature = "wire")]
     pub fn verify(&self) -> Result<JournalPosition, ChainBreak> {
         verify_chain(&self.committed)
     }
@@ -375,6 +388,7 @@ impl EffectJournal for MemoryJournal {
         ))
     }
 
+    #[cfg(feature = "wire")]
     fn compare_and_append(
         &mut self,
         expected_tail: JournalPosition,

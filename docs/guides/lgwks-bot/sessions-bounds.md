@@ -67,14 +67,14 @@ refusal, is refused at load with `BotError::ConflictingTerminalDeclaration`
 authorized therefore never runs as a handoff, which is what a consumer
 dispatching on the returned disposition depends on.
 
-`Terminal::outcome(EffectLedger) -> Outcome` (`crates/lgwks-bot/src/session/graph.rs:278`)
+`Terminal::outcome(EffectLedger) -> Outcome` (`crates/lgwks-bot/src/session/graph.rs:280`)
 carries two independent facts through unchanged, and that is the whole of the
 method:
 
 - the `Disposition`, one of `Completed`, `Referred`, `HandedOff`, `Refused`
-  (`crates/lgwks-bot/src/session/graph.rs:120`);
+  (`crates/lgwks-bot/src/session/graph.rs:122`);
 - the `EffectLedger`, a `confirmed` count and an `unsettled` count
-  (`crates/lgwks-bot/src/session/graph.rs:147`).
+  (`crates/lgwks-bot/src/session/graph.rs:149`).
 
 It does not classify, and the reason is in the source: an earlier version
 returned a single enum and had to choose, for a refused run that also left an

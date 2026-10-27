@@ -50,7 +50,7 @@ default-run = "lgwks-deps"
 #     and the HuggingFace tokenizer. Measured on this machine 2026-10-22:
 #     `cargo check -p lgwks_deps --features ml-candle,ml-tokenizers` cost 90 s on
 #     a warm target directory, against 35 s for `appcui`.
-default = []
+default = ["debug-doctor"]
 # Proc-macro authoring storefront: token streams (`proc-macro2`) and
 # quasi-quoting (`quote`) a first-party proc-macro crate needs. `lgwks_macros` is
 # the one consumer; it reaches both through the re-exports below, so this crate
@@ -109,6 +109,13 @@ bevy-ecs = ["dep:bevy_ecs"]
 bevy-app = ["bevy-ecs", "dep:bevy_app"]
 bevy-time = ["bevy-ecs", "dep:bevy_time"]
 bevy-state = ["bevy-ecs", "dep:bevy_state"]
+# The debug doctor's own global subscriber. Default-on, like every capability
+# this crate owns (#732), so `lgwks-deps debug` installs the debugger it
+# reports on. A process-only `lgwks_bot` consumer still never carries
+# `tracing-subscriber` (#687): every workspace edge to this crate is
+# `default-features = false`, so the default reaches only a direct storefront
+# install.
+debug-doctor = ["lgwks_std/trace-install"]
 # Interim zoned time (jiff): DST-aware calendar arithmetic and IANA zones
 # until ELIMINATE lands in lgwks_std::time. Default-off; lgwks_std::time stays
 # the UTC RFC 3339 core.

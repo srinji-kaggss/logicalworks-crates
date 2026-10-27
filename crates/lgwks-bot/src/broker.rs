@@ -48,7 +48,9 @@ use core::num::NonZeroU64;
 use std::collections::HashMap;
 
 use crate::effect::{EffectKey, EnvironmentEpoch, EnvironmentId};
-use crate::journal::{DurableAck, EffectEvent, EffectJournal, JournalError, JournalPosition};
+use crate::journal::JournalError;
+#[cfg(feature = "ecs")]
+use crate::journal::{DurableAck, EffectEvent, EffectJournal, JournalPosition};
 
 /// What the broker knows about one environment.
 #[derive(Debug, Clone, Copy)]
@@ -256,7 +258,7 @@ impl fmt::Display for Authority {
 ///
 /// One broker per run. It holds no native handle itself: the adopter that
 /// actually owns the process, socket or input seat lives behind whatever
-/// [`EffectJournal`] adapter and dispatch path the host supplies. What this owns
+/// `EffectJournal` adapter and dispatch path the host supplies. What this owns
 /// is the fence, because fencing is a comparison and a comparison needs one
 /// place that holds the current generation.
 #[derive(Debug, Default)]
@@ -571,6 +573,7 @@ impl From<JournalError> for DispatchError {
 /// and not a guarantee. The handoff path must present it to
 /// [`Broker::revalidate`] immediately before handing over, because a replacement
 /// landing in between would otherwise leave this preparation dispatchable.
+#[cfg(feature = "ecs")]
 #[derive(Debug)]
 pub(crate) struct Prepared {
     /// Authority for the environment generation the attempt was prepared
@@ -580,6 +583,7 @@ pub(crate) struct Prepared {
     ack: DurableAck,
 }
 
+#[cfg(feature = "ecs")]
 impl Prepared {
     /// Spend the preparation, taking the authority and the acknowledgment.
     ///
@@ -611,6 +615,7 @@ impl Prepared {
 /// [`DispatchError::Journal`] when the append is refused. The append is also
 /// where a second `DispatchPrepared` for one attempt is refused, so a retry that
 /// reuses an `AttemptId` fails here rather than dispatching twice.
+#[cfg(feature = "ecs")]
 pub(crate) async fn prepare_dispatch(
     broker: &Broker,
     journal: &mut dyn EffectJournal,
@@ -625,4 +630,5 @@ pub(crate) async fn prepare_dispatch(
 }
 
 #[cfg(test)]
+#[cfg(feature = "ecs")]
 mod tests;

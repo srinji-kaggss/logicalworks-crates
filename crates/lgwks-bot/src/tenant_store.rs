@@ -594,7 +594,11 @@ pub(super) fn open_header_file(path: &Path, header: &[u8]) -> Result<File, std::
 mod error;
 mod record;
 mod rows;
+// The operations and the snapshot they open from: every record is a wire
+// frame, so without `wire` there is nothing to open, read or write (#687).
+#[cfg(feature = "wire")]
 mod snapshot;
+#[cfg(feature = "wire")]
 mod store;
 
 use record::Stored;
