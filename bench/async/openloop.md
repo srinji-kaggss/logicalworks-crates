@@ -25,16 +25,50 @@ each power-of-two octave, so the relative error of any reported value is at most
 and total are exact; a percentile is the midpoint of its bucket; samples past the
 ceiling are counted rather than silently folded into the top one.
 
-`sim_openloop.rs` is the seeded model of that driver and **all 17 of its tests are
+`sim_openloop.rs` is the seeded model of that driver and **17 of its tests are
 deterministic simulation tests**: one seed drives arrival jitter and body
 length, a failure prints its seed, and the same seed replays to the same trace
 hash — asserted, on a hash that folds every scheduled event including every
-refusal.
+refusal. Four more pin the CPU door's own arithmetic: the hash replays per
+(seed, rounds) and diverges across seeds, pinned rounds declare their
+calibrated cost, the calibration is a positive finite cost, and the kind flag
+parses strictly (the calibration reads a wall clock, so that one test asserts
+a range, not a value).
 
 ```sh
 CARGO_TARGET_DIR=/tmp/lgwks-bench-async \
   cargo run --release --manifest-path bench/async/Cargo.toml -- --sim-open-loop
 ```
+
+## Body kinds — timer, then CPU
+
+Timer bodies park: `--saturation` and `--refusal` run `--body-kind=timer` by
+default, so the scheduler is the binding constraint and the cores idle. CPU
+bodies burn: `--body-kind=cpu --cpu-rounds=N` replaces the park with N fixed,
+seeded splitmix64 hash rounds per task (`support.rs`), so the cores are the
+binding constraint and the knee measures CPU contention. Both sides burn the
+same rounds from the same seed and each body records exactly one work unit,
+so the conservation gate (`work_units == completed`) and the cross-side
+fairness gate hold unchanged; the hash state is spent through `black_box`,
+not counted.
+
+The rounds are fixed, not derived per bound: a bound-derived CPU body would
+burn seconds per task at the wide bounds. The declared cost is the rounds'
+calibrated cost and the ladder is derived from the workers' capacity, not the
+ceiling's: a CPU ceiling wider than the worker count never binds. Mismatched
+flags are refused (`--cpu-rounds` with the timer kind, `--body-kind=cpu`
+without `--cpu-rounds`, `--cpu-rounds` beside `--body-micros`): each would run
+one door under another door's name.
+
+```sh
+CARGO_TARGET_DIR=/tmp/lgwks-bench-async \
+  cargo run --release --manifest-path bench/async/Cargo.toml -- \
+    --saturation --window=1 --body-kind=cpu --cpu-rounds=300000 --workers=2 \
+    --json=bench/async/saturation-cpu.json
+```
+
+The recorder survives the deep queues a CPU sweep builds past its knee: every `u64` has a
+bucket, and samples past the 34 s ceiling land in the top one and count as clamped.
 
 ## The flood split — a neighbour's cost under a fail-at-once flood
 

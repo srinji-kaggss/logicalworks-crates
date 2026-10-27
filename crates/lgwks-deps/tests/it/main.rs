@@ -45,6 +45,8 @@ mod default_run;
 mod embedding;
 mod estate_edges;
 mod feature_policy;
+mod gate_consumer;
+mod gate_ownership;
 mod identity_binding;
 mod metadata_dimensions;
 mod metadata_public_api;

@@ -126,6 +126,13 @@
 pub mod catalog;
 /// The approval register: parsing and lookup for `contract/APPROVED.toml`.
 pub mod contract;
+/// The doc-citation check's one implementation (#695): `lgwks_deps` owns the
+/// rule, the `check-doc-citations` binary is a thin shim over the shared
+/// entry, and `logical_ci`'s `docs-refs` gate is its designated library
+/// consumer through [`doc_citations::execute`], so a changed document's
+/// citations still resolve under one rule with one owner.
+#[doc(hidden)]
+pub mod doc_citations;
 /// The optional authored invariant register and its repository-aware validator.
 #[doc(hidden)]
 pub mod invariants;
@@ -134,6 +141,20 @@ pub mod invariants;
 pub mod lock;
 /// Cargo metadata edges: who authored which external dependency.
 pub mod metadata;
+/// The requirements check's one implementation (#695): `lgwks_deps` owns the
+/// rule, the `check-requirements` binary is a thin shim over the shared
+/// entry, and `logical_ci`'s `governance` gate is its designated library
+/// consumer through [`requirements::execute`], so a requirement is
+/// superseded, never edited, under one rule with one owner.
+#[doc(hidden)]
+pub mod requirements;
+/// The spec-owner check's one implementation (#695): `lgwks_deps` owns the
+/// rule, the `check-spec-owners` binary is a thin shim over the shared entry,
+/// and `logical_ci`'s `governance` gate is its designated library consumer
+/// through [`spec_owners::execute`], so every checked requirement has a
+/// falsifier row under one rule with one owner.
+#[doc(hidden)]
+pub mod spec_owners;
 /// The estate's one durable store: SQLite opened one way, migrated by version.
 ///
 /// Behind the `sqlite` storefront feature, so a consumer that needs state

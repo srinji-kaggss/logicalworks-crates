@@ -98,7 +98,11 @@ pub const CEILING_NANOS: u64 = 1 << (SUB_BITS + OCTAVES as u32);
 /// `1 / SUB_BUCKETS` at any magnitude.
 ///
 /// Two facts make the map total: every `u64` below [`CEILING_NANOS`] has a bucket, and
-/// every `u64` at or above it lands in the top one.
+/// every `u64` at or above it lands in the top one. The second half is a clamp
+/// on the slot, not just on the value: the value clamp alone maps the ceiling
+/// itself one slot past the array, which a workload with latencies past 34 s
+/// reaches and the recorder must survive (#639: the first CPU-contention sweep
+/// queued past it and aborted the run instead of reporting the queue).
 #[must_use]
 pub fn slot_of(nanos: u64) -> usize {
     let value = nanos.min(CEILING_NANOS);
@@ -108,7 +112,7 @@ pub fn slot_of(nanos: u64) -> usize {
     let octave = 63 - value.leading_zeros();
     let shift = octave - SUB_BITS;
     let index = (value >> shift) & (SUB_BUCKETS as u64 - 1);
-    SUB_BUCKETS + (shift as usize) * SUB_BUCKETS + (index as usize)
+    (SUB_BUCKETS + (shift as usize) * SUB_BUCKETS + (index as usize)).min(SLOTS - 1)
 }
 
 /// The inclusive value range one bucket covers.

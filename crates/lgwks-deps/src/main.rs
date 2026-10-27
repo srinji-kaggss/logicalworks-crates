@@ -128,6 +128,10 @@ USAGE
                                         open PATH with the estate defaults and report user_version, journal_mode, synchronous,
                                         busy_timeout_ms and tables; with TARGET, migrate then report
    `sqlite` exits 2 on a refused invocation and 1 on an engine refusal.
+   lgwks-deps gate [PATH]               run the consumer gate: admission, citations,
+               [--json]                   requirements, owners, script check, clippy
+               [--ast BIN]                and the architecture diff, in order, with one
+               [--base REF|DIR]           summary and one exit code
 
 EXIT
    0  every authored external edge has an admitted semantic owner
@@ -482,6 +486,7 @@ fn dispatch(
         Some("sqlite") => handle_sqlite(&args[1..], out, err),
         #[cfg(not(feature = "sqlite"))]
         Some("sqlite") => handle_sqlite_disabled(err),
+        Some("gate") => handle_gate(&args[1..], out, err),
         Some("-h" | "--help" | "help") => handle_help(out),
         other => handle_unknown(other, err),
     }
@@ -702,6 +707,7 @@ macro_rules! unwrap_or_refuse {
 mod check_report;
 mod debug_cmd;
 mod freshness_cmd;
+mod gate_cmd;
 mod request_cmd;
 
 use check_report::{
@@ -710,6 +716,7 @@ use check_report::{
 };
 use debug_cmd::handle_debug;
 use freshness_cmd::handle_freshness;
+use gate_cmd::handle_gate;
 use request_cmd::{run_init, run_request};
 
 /// Resolves a repository root into the command's string-refusal vocabulary.

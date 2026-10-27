@@ -60,6 +60,11 @@ arguments = ["--refusal", "--window=1"]
 record = "saturation-refuse.json"
 
 [[door]]
+name = "saturation-cpu"
+arguments = ["--saturation", "--window=1", "--body-kind=cpu", "--cpu-rounds=300000", "--workers=2"]
+record = "saturation-cpu.json"
+
+[[door]]
 name = "overload"
 arguments = [
     "--overload",

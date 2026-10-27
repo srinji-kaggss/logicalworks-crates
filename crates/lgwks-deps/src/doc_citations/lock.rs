@@ -18,6 +18,9 @@ const LOCK_HEADER: &str = "\
 # its claim rather than rewriting the entry to match.
 ";
 
+/// The lock's rows: each cited line's key and the text it read.
+pub(super) type Rows = BTreeMap<Key, String>;
+
 /// How the entries differ from the lock.
 pub(super) struct Drift {
     /// Cited lines whose text differs from the lock.
@@ -29,7 +32,7 @@ pub(super) struct Drift {
 }
 
 /// Reads the lock as `key -> cited line text`; absent is an empty lock.
-pub(super) fn read_lock(path: &Path) -> Result<BTreeMap<Key, String>, CiteError> {
+pub(super) fn read_lock(path: &Path) -> Result<Rows, CiteError> {
     let mut entries = BTreeMap::new();
     if !path.exists() {
         return Ok(entries);

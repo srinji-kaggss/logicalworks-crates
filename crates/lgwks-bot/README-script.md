@@ -42,10 +42,12 @@ The code reads top to bottom like a synchronous script; what runs is
 asynchronous, concurrent and bounded. What every flow gets without asking:
 
 - **The computer picks the numbers people get wrong.** `each` with no bound
-  runs 64 bodies per available core, capped at 65,536; a concurrency number
-  typed as a literal is a compile error, because it is right on one host and
-  wrong on the next. A limit that comes from outside (an upstream's quota) is
-  written `at most (quota) at once`.
+  draws from one process-wide pool: 64 bodies per available core, capped at
+  65,536 outstanding across every root scope in the process, so concurrent
+  roots divide the allowance instead of each taking the machine's width; a
+  concurrency number typed as a literal is a compile error, because it is
+  right on one host and wrong on the next. A limit that comes from outside
+  (an upstream's quota) is written `at most (quota) at once`.
 - **Retries cannot storm.** `retry up to N times` is also bounded by a budget
   shared by every `retry` under the root scope: 10 retries, plus one for every
   five first attempts (Finagle's `RetryBudget` defaults). One flaky step keeps

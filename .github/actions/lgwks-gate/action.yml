@@ -1,0 +1,58 @@
+name: lgwks consumer gate
+description: >-
+  Run `lgwks-deps gate` over a consumer repository: dependency admission,
+  doc citations, requirements, spec owners, `script check`, clippy with the
+  flow `forbid` lints, and the architecture diff against the base — one
+  summary, one exit code. See `lgwks-deps gate --help` for the legs.
+author: Logical Works Incorporated
+
+inputs:
+  path:
+    description: Repository to gate, relative to the checkout.
+    default: .
+  base:
+    description: >-
+      The architecture diff's base: a revision the checkout knows (needs
+      fetch-depth 0) or a directory.
+    default: origin/main
+  toolchain:
+    description: Rust toolchain the clippy leg runs under.
+    default: 1.99.1
+  lgwks-deps-version:
+    description: >-
+      lgwks_deps version to install; empty means the newest on crates.io.
+      Needs the release carrying `lgwks-deps gate` (5.1.0 or later).
+    default: ''
+  lgwks-ast-version:
+    description: >-
+      lgwks_ast version to install; empty means the newest on crates.io.
+      Needs the release carrying `script check` and `script diff`.
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Install the Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: clippy
+    - name: Install lgwks-deps
+      shell: bash
+      run: |
+        if [ -z "${{ inputs.lgwks-deps-version }}" ]; then
+          cargo install lgwks_deps --locked
+        else
+          cargo install lgwks_deps --version "${{ inputs.lgwks-deps-version }}" --locked
+        fi
+    - name: Install lgwks-ast
+      shell: bash
+      run: |
+        if [ -z "${{ inputs.lgwks-ast-version }}" ]; then
+          cargo install lgwks_ast --features tool --locked
+        else
+          cargo install lgwks_ast --version "${{ inputs.lgwks-ast-version }}" --features tool --locked
+        fi
+    - name: Run the consumer gate
+      shell: bash
+      run: lgwks-deps gate "${{ inputs.path }}" --base "${{ inputs.base }}"

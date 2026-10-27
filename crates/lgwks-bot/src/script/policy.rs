@@ -48,18 +48,29 @@
 //! rather than per call, beside Finagle's per-client budget whose tokens
 //! expire after ten seconds.
 //!
-//! # Fan-out is sized to the machine
+//! # Fan-out draws from one process-wide pool
 //!
 //! `each x in xs:` with no bound runs at most [`Policy::fan_out`] bodies at
-//! once: [`FAN_OUT_PER_CORE`] per available core, capped at
-//! [`MAX_IN_FLIGHT`]. A body in `each` spends its
-//! life waiting, so the bound is a ceiling on outstanding waits rather than on
-//! CPU work; it scales with the host so the same flow neither starves a large
-//! machine nor floods a small one. An external limit (an API that allows four
-//! concurrent calls) is still said explicitly with `at most (limit)`.
+//! once per root: [`FAN_OUT_PER_CORE`] per available core, capped at
+//! [`MAX_IN_FLIGHT`]. That per-root width is not a per-process limit on its
+//! own: every `Scope::root` and every standalone [`FanOut`](super::FanOut)
+//! mints a fresh policy, so N concurrent roots would hold N widths — on a
+//! 16-core host a default `Host` admits 1,024 runs, each able to hold a
+//! 1,024-wide `each`, about a million outstanding bodies from one process.
+//! The width is therefore drawn from the process-wide [`HostPool`]: 64 per
+//! available core, capped at [`MAX_IN_FLIGHT`], shared by every root in the
+//! process, so concurrent roots divide the allowance instead of multiplying
+//! it. A body in `each` spends its life waiting, so the pool bounds
+//! outstanding waits rather than CPU work; it scales with the host so the
+//! same flow neither starves a large machine nor floods a small one. An
+//! external limit (an API that allows four concurrent calls) is still said
+//! explicitly with `at most (limit)`, which keeps its own per-call width and
+//! does not draw from the pool: a declared bound is the author's, the pool
+//! is the machine's.
 
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::rt::clock::{Clock, duration_to_nanos};
 
@@ -202,7 +213,6 @@ impl Policy {
     pub(super) const fn fan_out(&self) -> NonZeroUsize {
         self.fan_out
     }
-
     /// A `retry` block is making its first attempt: earn a fraction of a retry.
     pub(super) fn first_attempt(&self) {
         match self.window.as_ref() {
@@ -287,6 +297,433 @@ impl Policy {
     }
 }
 
+// ── The host fan-out pool ────────────────────────────────────────────────────
+
+/// The process-wide ceiling on bodies an unbounded `each` may hold at once.
+///
+/// One pool for the process, not one per root: the per-root [`Policy::fan_out`]
+/// width is what a lone root may reach, and this pool is what N concurrent
+/// roots divide. The ceiling is the machine's allowance
+/// ([`FAN_OUT_PER_CORE`] per available core under [`MAX_IN_FLIGHT`]), read
+/// once at first use. Atomics only, so no lock is ever held across an await;
+/// the count is a guard for admission, not for other memory, so every access
+/// is relaxed.
+#[doc(hidden)]
+#[derive(Debug)]
+pub(crate) struct HostPool {
+    /// Bodies an unbounded `each` may hold at once, across every root.
+    ceiling: usize,
+    /// Bodies currently held, across every root.
+    outstanding: AtomicUsize,
+}
+
+#[doc(hidden)]
+impl HostPool {
+    /// A pool with `ceiling` permits, none held.
+    #[must_use]
+    pub(crate) fn with_ceiling(ceiling: usize) -> Self {
+        Self {
+            ceiling,
+            outstanding: AtomicUsize::new(0),
+        }
+    }
+
+    /// Hold one body when fewer than the ceiling are held; `false` holds
+    /// nothing and changes nothing.
+    pub(crate) fn try_acquire(&self) -> bool {
+        self.outstanding
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+                (held < self.ceiling).then(|| held.saturating_add(1))
+            })
+            .is_ok()
+    }
+
+    /// Hand back one body. A release with nothing held leaves the count at
+    /// zero rather than wrapping: the pairing is constructed (every acquire
+    /// is followed by exactly one release on the body's completion, failure
+    /// or drop), and a counter that wrapped would refuse every future
+    /// admission, which is the failure this pool exists to prevent.
+    pub(crate) fn release(&self) {
+        let released = self
+            .outstanding
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
+                held.checked_sub(1)
+            });
+        debug_assert!(
+            released.is_ok(),
+            "a host-pool release with nothing held: an acquire went unreleased or a body released twice"
+        );
+    }
+}
+
+/// The process-wide pool, read once from the machine at first use.
+static HOST_POOL: OnceLock<HostPool> = OnceLock::new();
+
+/// The process-wide pool every unbounded `each` draws from.
+///
+/// The ceiling is what this machine honestly runs at once
+/// ([`FAN_OUT_PER_CORE`] per available core under [`MAX_IN_FLIGHT`], one
+/// body when no parallelism was reported), fixed at first use so every root
+/// divides the same allowance for the life of the process.
+#[doc(hidden)]
+pub(crate) fn host_pool() -> &'static HostPool {
+    HOST_POOL.get_or_init(|| {
+        let ceiling = match Policy::machine_fan_out() {
+            Some(fan_out) => fan_out.get(),
+            None => 1,
+        };
+        HostPool::with_ceiling(ceiling)
+    })
+}
+
+/// The permits one unbounded `each` holds from the process-wide pool.
+///
+/// Acquired one body at a time as items are admitted, settled against the
+/// bodies still running as they complete, and released whole on failure,
+/// cancellation or drop: dropping the fan-out without settling it still hands
+/// every permit back, so an abandoned `each` cannot starve the roots that
+/// outlive it.
+///
+/// A fan-out with no body running may always start one, permit or not. Without
+/// that floor an `each` whose pool is empty has nothing of its own to wake it
+/// — another root's release wakes nobody — so it would park for good, and an
+/// unbounded `each` nested inside another's body would deadlock the moment the
+/// outer one held every permit. The floor costs at most one body per running
+/// fan-out past the ceiling, and it is what makes every `each` finish.
+#[doc(hidden)]
+#[derive(Debug)]
+pub(crate) struct HostLease<'pool> {
+    /// The pool the permits come from.
+    pool: &'pool HostPool,
+    /// Permits currently held; never more than the bodies running.
+    held: usize,
+}
+
+#[doc(hidden)]
+impl<'pool> HostLease<'pool> {
+    /// No permits held, from `pool`.
+    #[must_use]
+    pub(crate) fn take(pool: &'pool HostPool) -> Self {
+        Self { pool, held: 0 }
+    }
+
+    /// Whether one more body may start while `running` of this fan-out's
+    /// bodies are in flight: with a permit when the pool has one, and without
+    /// one when nothing of this fan-out is running (the floor above). `false`
+    /// holds nothing and changes nothing.
+    pub(crate) fn admit(&mut self, running: usize) -> bool {
+        if self.pool.try_acquire() {
+            self.held = self.held.saturating_add(1);
+            true
+        } else {
+            running == 0
+        }
+    }
+
+    /// Hand back every permit beyond the `running` bodies still in flight, so
+    /// a finished body returns its permit and the floor's body returns none.
+    pub(crate) fn settle(&mut self, running: usize) {
+        while self.held > running {
+            self.held = self.held.saturating_sub(1);
+            self.pool.release();
+        }
+    }
+
+    /// Hand back every permit held.
+    pub(crate) fn release_all(&mut self) {
+        while self.held > 0 {
+            self.held = self.held.saturating_sub(1);
+            self.pool.release();
+        }
+    }
+}
+
+impl Drop for HostLease<'_> {
+    /// Hand back whatever is still held: a fan-out dropped without settling
+    /// — cancelled, failed, or abandoned by its caller — keeps no permit.
+    fn drop(&mut self) {
+        self.release_all();
+    }
+}
+
 #[cfg(test)]
 #[path = "sim_policy.rs"]
 mod sim_policy;
+
+/// The host fan-out pool (#648), checked against exact counts.
+///
+/// Sources: the per-server retry throttle the retry budget follows (one shared
+/// budget per host, not one per run), and the semaphore discipline of pairing
+/// every acquisition with its release on every failure path.
+#[cfg(test)]
+mod pool_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{FAN_OUT_PER_CORE, HostLease, HostPool};
+    use crate::script::{FlowError, MAX_IN_FLIGHT, Scope, Tenant, each};
+    use crate::sim_stream::Stream;
+
+    /// What every test here returns.
+    type Outcome = Result<(), String>;
+
+    /// The seeds every family replays.
+    const SEEDS: [u64; 4] = [
+        0xB0D6_0000_0000_0001,
+        0xB0D6_0000_0000_0002,
+        0xB0D6_FFFF_0000_0003,
+        0x5701_B0D6_0000_0004,
+    ];
+
+    #[test]
+    /// A pool accounts every acquire against its release: the ceiling admits,
+    /// one past it refuses, a release admits again, and a drained pool admits
+    /// the whole ceiling afresh, so every acquire met exactly one release.
+    fn sim_a_pool_accounts_every_acquire_against_its_release() -> Outcome {
+        for seed in SEEDS {
+            let mut stream = Stream::new(seed);
+            let ceiling = stream.below(64)?.saturating_add(1);
+            let pool = HostPool::with_ceiling(ceiling);
+            for held in 1..=ceiling {
+                assert!(
+                    pool.try_acquire(),
+                    "seed {seed:#x}: acquire {held} of {ceiling}"
+                );
+            }
+            assert!(
+                !pool.try_acquire(),
+                "seed {seed:#x}: one past {ceiling} is refused"
+            );
+            pool.release();
+            assert!(
+                pool.try_acquire(),
+                "seed {seed:#x}: a released permit admits again"
+            );
+            for _ in 0..ceiling {
+                pool.release();
+            }
+            for held in 1..=ceiling {
+                assert!(
+                    pool.try_acquire(),
+                    "seed {seed:#x}: readmit {held} after the drain"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    /// The floor and the settle: a fan-out with nothing running starts one
+    /// body from an empty pool and holds no permit for it, one with a body
+    /// running waits, settling hands back exactly the permits past the bodies
+    /// in flight, and dropped leases leave the pool whole.
+    fn a_lease_admits_one_body_from_an_empty_pool_and_settles_exactly() {
+        let pool = HostPool::with_ceiling(2);
+        {
+            let mut first = HostLease::take(&pool);
+            assert!(first.admit(0), "the pool admits its first permit");
+            assert!(first.admit(1), "the pool admits its second permit");
+            assert!(
+                !first.admit(2),
+                "a full pool refuses a fan-out already running"
+            );
+            let mut second = HostLease::take(&pool);
+            assert!(
+                second.admit(0),
+                "nothing of this fan-out runs: the floor starts one"
+            );
+            assert!(
+                !second.admit(1),
+                "with its floor body running it waits for a permit"
+            );
+            second.settle(0);
+            assert!(
+                !pool.try_acquire(),
+                "the floor body held no permit to hand back"
+            );
+            first.settle(1);
+            assert!(
+                second.admit(1),
+                "a settled permit admits the waiting fan-out"
+            );
+        }
+        assert!(
+            pool.try_acquire(),
+            "dropped leases hand the first permit back"
+        );
+        assert!(pool.try_acquire(), "and the second");
+        assert!(!pool.try_acquire(), "and no permit was made from nothing");
+    }
+
+    #[test]
+    /// Roots racing on one pool neither wedge it nor leak a permit: afterwards
+    /// the whole ceiling admits afresh, however the threads interleaved.
+    fn sim_racing_roots_neither_wedge_nor_leak_the_pool() -> Outcome {
+        for seed in SEEDS {
+            let mut stream = Stream::new(seed);
+            let ceiling = stream.below(128)?.saturating_add(8);
+            let rounds = stream.below(512)?.saturating_add(128);
+            let threads = stream.below(5)?.saturating_add(2);
+            let pool = HostPool::with_ceiling(ceiling);
+            std::thread::scope(|scope| {
+                for _ in 0..threads {
+                    scope.spawn(|| {
+                        let mut lease = HostLease::take(&pool);
+                        for round in 0..rounds {
+                            if lease.admit(round % 2) {
+                                lease.settle(0);
+                            }
+                        }
+                    });
+                }
+            });
+            for held in 1..=ceiling {
+                assert!(
+                    pool.try_acquire(),
+                    "seed {seed:#x}: readmit {held} of {ceiling}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// A future that returns `Pending` once, waking itself, and then resolves.
+    struct YieldOnce(bool);
+
+    impl std::future::Future for YieldOnce {
+        type Output = ();
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<()> {
+            let this = self.get_mut();
+            if this.0 {
+                return std::task::Poll::Ready(());
+            }
+            this.0 = true;
+            context.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    }
+
+    /// What the bodies of concurrent roots count through.
+    #[derive(Default)]
+    struct Watch {
+        /// Bodies in flight now.
+        live: AtomicUsize,
+        /// The most bodies ever in flight at once.
+        peak: AtomicUsize,
+        /// Bodies started.
+        started: AtomicUsize,
+    }
+
+    impl Watch {
+        /// One body: counted in, yielded once, counted out.
+        async fn body(&self, index: usize) -> Result<usize, FlowError> {
+            self.started.fetch_add(1, Ordering::Relaxed);
+            let now = self.live.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+            self.peak.fetch_max(now, Ordering::Relaxed);
+            YieldOnce(false).await;
+            self.live.fetch_sub(1, Ordering::Relaxed);
+            Ok(index)
+        }
+    }
+
+    /// The machine's pool ceiling, by the formula `host_pool` reads.
+    fn machine_ceiling() -> usize {
+        let cores = match std::thread::available_parallelism() {
+            Ok(cores) => cores.get(),
+            Err(_) => 1,
+        };
+        cores.saturating_mul(FAN_OUT_PER_CORE).min(MAX_IN_FLIGHT)
+    }
+
+    #[test]
+    /// An unbounded `each` nested in another's bodies finishes even when the
+    /// outer fan-out holds every permit: each inner fan-out starts its floor
+    /// body, so the outer bodies complete and every value comes back in order.
+    /// Without the floor an inner `each` facing an empty pool parks with
+    /// nothing to wake it, and the outer never finishes.
+    fn a_nested_unbounded_each_finishes_when_the_outer_holds_every_permit() -> Outcome {
+        let items = machine_ceiling().saturating_add(1);
+        let tenant = Tenant::new("pool-nested").map_err(|error| error.to_string())?;
+        let root = Scope::root(tenant);
+        let values = crate::block_on(each(
+            &root,
+            "outer",
+            None,
+            0..items,
+            |scope, index| async move {
+                let inner = each(&scope, "inner", None, 0..3_usize, |_, step| async move {
+                    YieldOnce(false).await;
+                    Ok::<usize, FlowError>(step)
+                })
+                .await?;
+                Ok::<usize, FlowError>(index.saturating_add(inner.iter().sum::<usize>()))
+            },
+        ))
+        .map_err(|error| error.to_string())?;
+        let expected: Vec<usize> = (0..items).map(|index| index.saturating_add(3)).collect();
+        assert_eq!(values, expected, "every outer value comes back, in order");
+        Ok(())
+    }
+
+    #[test]
+    /// Concurrent roots divide the one pool: four roots each demanding more
+    /// than the ceiling peak at no more than it plus one floor body per root,
+    /// and every value comes back in input order on every root. The bound
+    /// holds in every schedule: the pool refuses past the ceiling atomically,
+    /// and a root takes its floor body only with nothing of its own running.
+    fn sim_concurrent_roots_divide_the_one_pool() -> Outcome {
+        const ROOTS: usize = 4;
+        let ceiling = machine_ceiling();
+        let items = ceiling.saturating_add(1);
+        let watch = Watch::default();
+        let watch = &watch;
+        let failures: Vec<String> = std::thread::scope(|threads| {
+            // Every root is spawned before any is joined, so the four run at once.
+            let mut handles = Vec::with_capacity(ROOTS);
+            for root in 0..ROOTS {
+                handles.push(threads.spawn(move || {
+                    let tenant =
+                        Tenant::new(&format!("pool-{root}")).map_err(|error| error.to_string())?;
+                    let scope = Scope::root(tenant);
+                    let values =
+                        crate::block_on(each(&scope, "fan", None, 0..items, |_, index| {
+                            watch.body(index)
+                        }))
+                        .map_err(|error| format!("root {root} failed: {error}"))?;
+                    if values == (0..items).collect::<Vec<_>>() {
+                        Ok(())
+                    } else {
+                        Err(format!("root {root}: values came back out of order"))
+                    }
+                }));
+            }
+            handles
+                .into_iter()
+                .filter_map(|handle| match handle.join() {
+                    Ok(Ok(())) => None,
+                    Ok(Err(failure)) => Some(failure),
+                    Err(_) => Some("a root's thread failed".to_owned()),
+                })
+                .collect()
+        });
+        assert!(
+            failures.is_empty(),
+            "concurrent roots failed: {}",
+            failures.join("; ")
+        );
+        assert_eq!(
+            watch.started.load(Ordering::Relaxed),
+            ROOTS.saturating_mul(items),
+            "every item ran exactly once on every root"
+        );
+        assert_eq!(watch.live.load(Ordering::Relaxed), 0, "none left in flight");
+        assert!(
+            watch.peak.load(Ordering::Relaxed) <= ceiling.saturating_add(ROOTS),
+            "four roots peaked past the one shared pool plus their floor bodies"
+        );
+        Ok(())
+    }
+}
