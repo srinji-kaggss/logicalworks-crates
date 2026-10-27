@@ -508,12 +508,26 @@ fn leg_clippy(children: &Children, env: &BTreeMap<String, String>, root: &Path) 
     leg
 }
 
+/// 64 bits from the one entropy source, `lgwks_std::random`. This crate takes
+/// `random` off wasm (INV-RANDOM-ONE-SOURCE), where no gate child can spawn
+/// either, so there it is `None` and each caller skips with its reason.
+#[cfg(not(target_family = "wasm"))]
+fn gate_bits() -> Option<[u8; 8]> {
+    lgwks_std::random::bytes::<8>().ok()
+}
+
+/// No entropy source on wasm: see the native `gate_bits`.
+#[cfg(target_family = "wasm")]
+fn gate_bits() -> Option<[u8; 8]> {
+    None
+}
+
 /// The clippy log's path: 64 random bits under the subject's target
 /// directory, so two gates never share one and no build output lands in the
 /// repository. The directory is created: a fresh checkout has no `target`
 /// until cargo makes one, and the log must exist before clippy runs.
 fn clippy_log(root: &Path) -> Option<PathBuf> {
-    let bits = lgwks_std::random::bytes::<8>().ok()?;
+    let bits = gate_bits()?;
     let dir = root.join("target");
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir.join(format!(
@@ -565,7 +579,7 @@ fn summarize_transcript(transcript: &str) -> String {
 /// the architecture leg skips with its reason rather than gating on a
 /// directory it cannot claim).
 fn scratch_dir(root: &Path) -> Option<PathBuf> {
-    let bits = lgwks_std::random::bytes::<8>().ok()?;
+    let bits = gate_bits()?;
     let candidate = root.join(format!(
         "target/lgwks-gate-base-{:016x}",
         u64::from_le_bytes(bits)
