@@ -1,8 +1,7 @@
 # 1. The headline, before the method
 
-Part of [production readiness](../production-readiness.md), §1. The dated updates
-that follow it are [2026-10-04](update-2026-10-04.md) and
-[2026-10-05 onward](updates-latest.md).
+Part of [production readiness](../production-readiness.md), §1. What moved after
+2026-09-28 is summarised on that page.
 
 **This does not currently pass its own release gate.** Issue
 [#109](https://github.com/srinji-kaggss/logicalworks-crates/issues/109) held

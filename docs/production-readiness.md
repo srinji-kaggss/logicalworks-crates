@@ -34,10 +34,12 @@ attended, inspectable automation where a human can intervene; not yet for a bot
 that runs for weeks and acts without you.
 
 - [The headline, and the update of 2026-09-28](production-readiness/headline.md)
-- [Update, 2026-10-04](production-readiness/update-2026-10-04.md)
-- [Updates, 2026-10-05 onward](production-readiness/updates-latest.md), ending
-  with 2026-10-15: the VPS profile was measured under a cgroup, the closed-loop
-  latency target is met, and the acceptance campaign ran.
+- Since then: the VPS profile was measured under a 2 CPU / 2 GiB cgroup with the
+  closed-loop latency target met ([`bench/async/vps.md`](../bench/async/vps.md)),
+  and the acceptance campaign ran 251 of 251 named tests on both containment
+  backends in CI run
+  [38795282994](https://github.com/srinji-kaggss/logicalworks-crates/actions/runs/38795282994).
+  The dated update pages are in git history before 2026-10-27.
 
 ## 2. The claim under test
 

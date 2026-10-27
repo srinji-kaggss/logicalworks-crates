@@ -66,6 +66,7 @@ under it.
 
 ## More pages
 
+- [HTTP](http.md): the pooled client, streamed bodies and server-sent events, pagination and the mTLS seam.
 - [Logging](logging.md): why library code never prints, and `trace`.
 - [Notes and glob matching](details.md): support-round notes and the glob dialects.
 - [Reference](reference.md): the feature table, module reference, entropy targets and walk threat models.
