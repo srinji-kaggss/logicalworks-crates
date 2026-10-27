@@ -13,6 +13,7 @@ the crate is the decision. An `off` row states why in ADR 0003.
 | build scripts | `lgwks_std::build` | `lgwks_std` | `build` | on | build script, build.rs, rerun-if-changed, OUT_DIR, cargo directive, input digest, build input |
 | hash | `lgwks_std::hash` | `lgwks_std` | `hash` | on | hash, digest, blake3, sha2, sha256, fingerprint, content identity |
 | trace | `lgwks_std::trace` | `lgwks_std` | `trace` | on | trace, tracing, logging, log, subscriber, debug output, println, eprintln |
+| trace install | `lgwks_std::trace::install` | `lgwks_std` | `trace-install` | on | trace install, subscriber install, tracing subscriber, global default |
 | hex | `lgwks_std::hex` | `lgwks_std` | `core` | on | hex, hexadecimal, encode hex, decode hex |
 | encoding | `lgwks_std::encoding` | `lgwks_std` | `core` | on | base64, percent, percent-encoding, url encoding |
 | json | `lgwks_std::json` | `lgwks_std` | `json` | on | json, serde, serde_json, deserialize, serialize |
@@ -38,7 +39,7 @@ the crate is the decision. An `off` row states why in ADR 0003.
 | inspect | `lgwks_bot::inspect` | `lgwks_bot` | `inspect` | off — native tree-sitter grammars cannot build for wasm32-wasip1, which the bot's default set builds; `--features inspect` (or `full`) turns it on and the suite runs it there (ADR 0003). | inspect, code check, structural check, safe review |
 | authority | `lgwks_bot::cap` | `lgwks_bot` | `always` | on | authority, grant, capability, permission |
 | journal | `lgwks_bot::journal` | `lgwks_bot` | `always` | on | journal, durable, effect record, replay, crash recovery |
-| ecs | `lgwks_bot::ecs` | `lgwks_bot` | `always` | on | ecs, schedule, change detection, tick, observe evaluate execute |
+| ecs | `lgwks_bot::ecs` | `lgwks_bot` | `ecs` | on | ecs, schedule, change detection, tick, observe evaluate execute |
 | parse | `lgwks_ast::parser` | `lgwks_ast` | `parser` | on | parse, parser, ast, tree-sitter, ast-grep, syntax |
 | scan | `lgwks_ast::scan` | `lgwks_ast` | `scan` | on | scan, zero gate, source detectors, lint |
 | script reader | `lgwks_ast::script` | `lgwks_ast` | `script` | on | script reader, script parse, lexicon |

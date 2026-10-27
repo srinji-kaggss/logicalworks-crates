@@ -50,7 +50,7 @@ That is this workspace's bot model, arrived at independently:
 | `Where` URL / cookie / selector guards | the conditions an `Observe` domain reports | `domain/*.rs` |
 | `What[]` action pipeline | `Execute::execute_action`, one effect per call | `verb.rs` |
 | `WorkflowInterpreter` state matcher | the ECS schedule: a condition is `Changed<T>` | `docs/bot-on-ecs.md` §1 |
-| `WorkflowFile.meta` + graph | `FlowSpec` (vars, entry, nodes, edges, terminals) | `crates/lgwks-bot/src/session/graph.rs:385` |
+| `WorkflowFile.meta` + graph | `FlowSpec` (vars, entry, nodes, edges, terminals) | `crates/lgwks-bot/src/session/graph.rs:387` |
 | a step that dispatches to a subsystem | `NodeKind::Route { dispatch, fallback }` | `crates/lgwks-bot/src/session/validate.rs:184` |
 
 So the first and largest correction to make is that **the fold does not need a

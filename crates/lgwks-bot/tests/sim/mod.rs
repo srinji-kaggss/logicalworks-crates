@@ -39,11 +39,14 @@
 //! from a crate, because a simulation whose entropy source is a dependency is
 //! not reproducible across a lockfile bump.
 
+#[cfg(all(feature = "ecs", feature = "wire"))]
 pub mod rig;
 
 use std::error::Error;
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(all(feature = "ecs", feature = "wire"))]
+use std::path::Path;
+use std::path::PathBuf;
 
 // ── Randomness and the trace ──────────────────────────────────────────────
 
@@ -53,7 +56,11 @@ mod seed_helpers;
 pub use seed::{Rng, Trace};
 
 mod band;
-pub use band::{BANDS, Band, SEED_SPACE, band_of, bands};
+#[cfg(feature = "rt")]
+pub use band::bands;
+#[cfg(all(feature = "ecs", feature = "wire"))]
+pub use band::{BANDS, SEED_SPACE};
+pub use band::{Band, band_of};
 
 // ── Time ───────────────────────────────────────────────────────────────────
 
@@ -183,6 +190,7 @@ impl Envelope {
     /// How many times this envelope has been put on the wire. Above one means
     /// a duplicate is being delivered, which is the case an at-least-once
     /// consumer has to survive.
+    #[cfg(all(feature = "ecs", feature = "wire"))]
     pub fn attempts(&self) -> u32 {
         self.attempts
     }
@@ -265,11 +273,13 @@ impl Network {
     }
 
     /// How many envelopes are still on the wire.
+    #[cfg(all(feature = "ecs", feature = "wire"))]
     pub fn in_flight(&self) -> usize {
         self.in_flight.len()
     }
 
     /// Delivered, dropped and duplicated, for the trace.
+    #[cfg(all(feature = "ecs", feature = "wire"))]
     pub fn counts(&self) -> (u32, u32, u32) {
         (self.delivered, self.dropped, self.duplicated)
     }
@@ -343,6 +353,7 @@ impl Sim {
     }
 
     /// Send at the current tick, so the envelope is due now.
+    #[cfg(all(feature = "ecs", feature = "wire"))]
     pub fn send_now(&mut self, from: u32, to: u32, body: Vec<u8>) {
         let due = self.clock.now();
         self.net.send(from, to, body, due);
@@ -385,6 +396,7 @@ impl Sim {
     /// would have been the shorter answer and the wrong one: the OS reuses it,
     /// so it is not an identity. Nothing in the repository's own tree is ever
     /// written to.
+    #[cfg(feature = "rt")]
     pub fn scratch(&mut self, tag: &str) -> Result<PathBuf, Box<dyn Error>> {
         let unique = lgwks_std::random::bytes::<8>()?;
         let suffix: Vec<String> = unique.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -399,6 +411,7 @@ impl Sim {
     }
 
     /// A journal path inside this run's scratch space.
+    #[cfg(all(feature = "ecs", feature = "wire"))]
     pub fn journal_path(&self, dir: &Path, tenant: u32) -> PathBuf {
         dir.join(format!("tenant-{tenant}.jrnl"))
     }

@@ -1,9 +1,11 @@
 //! The flow document: nodes, edges, terminals, bounds and the spec that owns them. Split from `session.rs` (#526).
 
+#[cfg(feature = "ron")]
+use super::parse_ron;
 use super::{
     BTreeMap, BotError, DeclaredNodes, Deserialize, NodeId, Predicate, ResourceLimits,
     SHIPPED_LIMITS, Serialize, VarType, check_flow_size, flow, malformed_flow, merge_read_kinds,
-    parse_json, parse_ron, reject_unknown_node_kinds,
+    parse_json, reject_unknown_node_kinds,
 };
 
 /// A declared flow node and its closed operation kind.
@@ -445,6 +447,7 @@ impl FlowSpec {
     /// one: a file a person writes and reads. The encoding is serde's, so the
     /// document is the same one [`to_json`](Self::to_json) writes, spelled with
     /// the unquoted keys, comments and trailing commas RON allows.
+    #[cfg(feature = "ron")]
     pub fn to_ron(&self) -> Result<String, lgwks_std::ron::Error> {
         lgwks_std::ron::to_string_pretty(self)
     }
@@ -483,6 +486,7 @@ impl FlowSpec {
     ///
     /// The cost is on the JSON side, where the same variant becomes
     /// `{"end": {}}`, and a unit variant becomes the bare string `"end"`.
+    #[cfg(feature = "ron")]
     pub fn from_ron(source: &str) -> Result<Self, BotError> {
         check_flow_size(source)?;
         // No node-kind guard here, and the reason is RON's rather than a

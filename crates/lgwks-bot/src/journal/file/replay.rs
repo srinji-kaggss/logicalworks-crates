@@ -1,11 +1,19 @@
 //! Streaming replay: the read-only file view and the Replay iterator.
 
+#[cfg(feature = "wire")]
+use super::EffectEvent;
+#[cfg(feature = "wire")]
+use super::resolve_ambiguous_tail;
+use super::{BufReader, File, JournalError, JournalPosition, OpenOptions, Path, ReplayCursor};
+#[cfg(feature = "wire")]
+use super::{Continuation, verify_frame};
+#[cfg(feature = "wire")]
 use super::{
-    BufReader, Continuation, Corruption, CorruptionKind, EffectEvent, File, FramePiece, HEAD_BYTES,
-    JournalError, JournalLimitKind, JournalPosition, LENGTH_BYTES, MAX_FRAME_BYTES,
-    MAX_JOURNAL_EVENTS, OpenOptions, Path, ReplayCursor, SaturatingFrom, WireError, from_bytes,
-    read_exact_classified, read_exact_or_eof, resolve_ambiguous_tail, verify_frame,
+    Corruption, CorruptionKind, FramePiece, HEAD_BYTES, JournalLimitKind, LENGTH_BYTES,
+    MAX_FRAME_BYTES, MAX_JOURNAL_EVENTS, SaturatingFrom, read_exact_classified, read_exact_or_eof,
 };
+#[cfg(feature = "wire")]
+use super::{WireError, from_bytes};
 
 /// A read-only window onto the journal's file, for the handle's own fence.///
 /// It exists so the fence can ask how long the file is without asking the
@@ -114,6 +122,7 @@ impl Replay {
     /// events is complete without either. Bounded: every turn consumes a frame,
     /// and at most one checkpoint frame is consumed without yielding, because a
     /// second one is refused.
+    #[cfg(feature = "wire")]
     pub(super) fn read_one(&mut self) -> Option<Result<EffectEvent, JournalError>> {
         loop {
             match self.read_frame()? {
@@ -126,6 +135,7 @@ impl Replay {
 
     /// Consume one whole frame: `Some(Ok(Some(event)))` for an event,
     /// `Some(Ok(None))` for a checkpoint frame, `None` at the end.
+    #[cfg(feature = "wire")]
     pub(super) fn read_frame(&mut self) -> Option<Result<Option<EffectEvent>, JournalError>> {
         let frame = self.frames;
         let mut prefix = [0u8; LENGTH_BYTES];
@@ -175,6 +185,7 @@ impl Replay {
     }
 
     /// Decide one whole frame the way the open scan decides it.
+    #[cfg(feature = "wire")]
     pub(super) fn admit(
         &mut self,
         payload: &[u8],
@@ -219,6 +230,7 @@ impl Replay {
     /// acknowledged frame under a lying length is the refusal `open` would have
     /// made. A stream that ended quietly there would hand a fold fewer events than
     /// were acknowledged, which is the loss the refusal exists to prevent.
+    #[cfg(feature = "wire")]
     pub(super) fn end_of_acknowledged_prefix(
         &mut self,
     ) -> Option<Result<Option<EffectEvent>, JournalError>> {
@@ -234,6 +246,7 @@ impl Replay {
     }
 }
 
+#[cfg(feature = "wire")]
 impl Iterator for Replay {
     type Item = Result<EffectEvent, JournalError>;
 

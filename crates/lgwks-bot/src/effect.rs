@@ -43,7 +43,8 @@
 use core::fmt;
 use core::num::{NonZeroU64, NonZeroU128};
 
-use lgwks_std::hash::{Digest, Hasher};
+use lgwks_std::hash::Digest;
+#[cfg(feature = "wire")]
 use lgwks_std::wire::{AlignedVec, WireError};
 
 /// Why an [`Id128`] could not be parsed.
@@ -94,8 +95,6 @@ impl fmt::Display for IdError {
     }
 }
 
-impl std::error::Error for IdError {}
-
 /// Why a fresh identifier could not be minted from the operating system.
 ///
 /// Two arms, and neither has a fallback. [`lgwks_std::random`] enforces
@@ -124,30 +123,6 @@ pub enum MintError {
     Zero,
 }
 
-#[cfg(feature = "ephemeral")]
-impl fmt::Display for MintError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // The scrutinee is `*self` so each pattern's type is the enum's own
-        // rather than a reference to it, and the non-`Copy` payload is bound by
-        // `ref`. `clippy::pattern_type_mismatch` is forbidden in this workspace
-        // and this is the form it asks for, as in `JournalError`.
-        match *self {
-            Self::Entropy(ref cause) => write!(f, "could not mint an identifier: {cause}"),
-            Self::Zero => f.write_str("the entropy source returned the all-zero identifier"),
-        }
-    }
-}
-
-#[cfg(feature = "ephemeral")]
-impl std::error::Error for MintError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match *self {
-            Self::Entropy(ref cause) => Some(cause),
-            Self::Zero => None,
-        }
-    }
-}
-
 /// A 128-bit identifier that is never zero.
 ///
 /// The non-zero invariant is carried by [`NonZeroU128`] rather than checked at
@@ -155,20 +130,16 @@ impl std::error::Error for MintError {
 /// Equality is the ordinary integer comparison: unlike
 /// [`Digest`], these are public identifiers rather than secret-derived values,
 /// and a constant-time comparison would buy nothing.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    lgwks_std::wire::Archive,
-    lgwks_std::wire::Serialize,
-    lgwks_std::wire::Deserialize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "wire",
+    derive(
+        lgwks_std::wire::Archive,
+        lgwks_std::wire::Serialize,
+        lgwks_std::wire::Deserialize
+    )
 )]
-#[rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
+#[cfg_attr(feature = "wire", rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug)))]
 pub struct Id128(NonZeroU128);
 
 impl Id128 {
@@ -256,12 +227,6 @@ impl Id128 {
     }
 }
 
-impl fmt::Display for Id128 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.to_hex())
-    }
-}
-
 /// Declare a newtype over [`Id128`] for one role in the effect key.
 ///
 /// Three of the seven key fields are 128-bit ids with identical representation
@@ -272,12 +237,8 @@ macro_rules! id_role {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[derive(
-            lgwks_std::wire::Archive,
-            lgwks_std::wire::Serialize,
-            lgwks_std::wire::Deserialize,
-        )]
-        #[rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
+        #[cfg_attr(feature = "wire", derive(lgwks_std::wire::Archive, lgwks_std::wire::Serialize, lgwks_std::wire::Deserialize))]
+        #[cfg_attr(feature = "wire", rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug)))]
         pub struct $name(Id128);
 
         impl $name {
@@ -398,18 +359,6 @@ pub enum CounterError {
     Overflow,
 }
 
-impl fmt::Display for CounterError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match *self {
-            Self::NotDecimal => "counter must be a minimal base-10 unsigned integer",
-            Self::Zero => "counter must be at least 1",
-            Self::Overflow => "counter exceeds u64::MAX",
-        })
-    }
-}
-
-impl std::error::Error for CounterError {}
-
 /// Declare a newtype over [`NonZeroU64`] for one monotonic counter.
 ///
 /// Shared for the same reason [`id_role`] is: [`AttemptId`] and
@@ -419,12 +368,8 @@ macro_rules! counter_role {
     ($(#[$meta:meta])* $name:ident, $what:literal) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[derive(
-            lgwks_std::wire::Archive,
-            lgwks_std::wire::Serialize,
-            lgwks_std::wire::Deserialize,
-        )]
-        #[rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
+        #[cfg_attr(feature = "wire", derive(lgwks_std::wire::Archive, lgwks_std::wire::Serialize, lgwks_std::wire::Deserialize))]
+        #[cfg_attr(feature = "wire", rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug)))]
         pub struct $name(NonZeroU64);
 
         impl $name {
@@ -585,33 +530,13 @@ pub enum DigestError {
     Malformed(lgwks_std::hash::DigestParseError),
 }
 
-impl fmt::Display for DigestError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::UnknownAlgorithm => f.write_str("digest algorithm is not one the schema defines"),
-            Self::UnsupportedAlgorithm { algorithm } => write!(
-                f,
-                "digest algorithm {algorithm} is not computable or verifiable here; \
-                 this crate accepts blake3_256"
-            ),
-            Self::Malformed(ref cause) => write!(f, "{cause}"),
-        }
-    }
-}
-
-impl std::error::Error for DigestError {}
-
 /// Declare a newtype over the estate's content digest for one digest role.
 macro_rules! digest_role {
     ($(#[$meta:meta])* $name:ident, $what:literal) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        #[derive(
-            lgwks_std::wire::Archive,
-            lgwks_std::wire::Serialize,
-            lgwks_std::wire::Deserialize,
-        )]
-        #[rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
+        #[cfg_attr(feature = "wire", derive(lgwks_std::wire::Archive, lgwks_std::wire::Serialize, lgwks_std::wire::Deserialize))]
+        #[cfg_attr(feature = "wire", rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug)))]
         pub struct $name(Digest);
 
         impl $name {
@@ -701,36 +626,6 @@ pub enum EffectKeyError {
     Digest(DigestError),
 }
 
-impl fmt::Display for EffectKeyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Id(cause) => write!(f, "{cause}"),
-            Self::Counter(cause) => write!(f, "{cause}"),
-            Self::Digest(ref cause) => write!(f, "{cause}"),
-        }
-    }
-}
-
-impl std::error::Error for EffectKeyError {}
-
-impl From<IdError> for EffectKeyError {
-    fn from(cause: IdError) -> Self {
-        Self::Id(cause)
-    }
-}
-
-impl From<CounterError> for EffectKeyError {
-    fn from(cause: CounterError) -> Self {
-        Self::Counter(cause)
-    }
-}
-
-impl From<DigestError> for EffectKeyError {
-    fn from(cause: DigestError) -> Self {
-        Self::Digest(cause)
-    }
-}
-
 /// The exact identity a settlement is about.
 ///
 /// Seven fields, because a settlement that omits any of them cannot be checked
@@ -749,18 +644,16 @@ impl From<DigestError> for EffectKeyError {
 /// A slot or entry index is instrumentation, not identity, and is deliberately
 /// absent: it is the one field that changes when a chain is edited, and a
 /// settlement must survive an edit to a different part of the chain.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    lgwks_std::wire::Archive,
-    lgwks_std::wire::Serialize,
-    lgwks_std::wire::Deserialize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "wire",
+    derive(
+        lgwks_std::wire::Archive,
+        lgwks_std::wire::Serialize,
+        lgwks_std::wire::Deserialize
+    )
 )]
-#[rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
+#[cfg_attr(feature = "wire", rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug)))]
 pub struct EffectKey {
     /// Which run this effect belongs to.
     run: RunId,
@@ -886,24 +779,9 @@ impl EffectKey {
     /// # Errors
     ///
     /// [`WireError`] if the archive cannot be allocated.
+    #[cfg(feature = "wire")]
     pub fn to_bytes(self) -> Result<AlignedVec, WireError> {
         lgwks_std::wire::to_bytes::<WireError>(&self)
-    }
-}
-
-impl fmt::Display for EffectKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "run {} action {} attempt {} flow {} digest {} env {} epoch {}",
-            self.run,
-            self.action,
-            self.attempt,
-            self.flow,
-            self.digest,
-            self.environment,
-            self.epoch
-        )
     }
 }
 
@@ -976,14 +854,14 @@ impl EffectIdentity {
     /// [`MintError::Entropy`] when the operating system's entropy source could
     /// not be read, and [`MintError::Zero`] when it returned 128 zero bits.
     ///
-    /// `pub(crate)`: the only caller is [`EffectScope::ephemeral`], and
+    /// `pub(crate)`: the only caller is `EffectScope::ephemeral` (feature `ecs`), and
     /// ephemerality is a property of a *scope*, not of an identity. An identity
     /// is three facts with no lifetime, so an "ephemeral" one held on its own is
     /// half a construction — the caller who wants a fresh identity and a durable
     /// journal has [`RunId::mint`], [`EnvironmentId::mint`] and
     /// [`EffectIdentity::new`].
     ///
-    /// [`EffectScope::ephemeral`]: crate::ecs::EffectScope::ephemeral
+    /// `EffectScope::ephemeral` is the ephemeral scope constructor (feature `ecs`).
     #[cfg(feature = "ephemeral")]
     pub(crate) fn ephemeral() -> Result<Self, MintError> {
         Ok(Self {
@@ -1060,380 +938,13 @@ impl EffectIdentity {
     }
 }
 
+mod display;
+mod input;
+
+pub use input::InputIdentity;
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const RUN: &str = "0102030405060708090a0b0c0d0e0f10";
-    const ACTION: &str = "1112131415161718191a1b1c1d1e1f20";
-    const ENV: &str = "2122232425262728292a2b2c2d2e2f30";
-    const FLOW_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-    const DIGEST_HEX: &str = "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeffe0e1e2e3e4e5e6e7e8e9eaebecedeeef";
-
-    /// The crate refuses a panicking path anywhere, tests included, so a test
-    /// that needs a parsed value returns `Result` and propagates. A failure
-    /// then names the cause instead of a line number in a macro.
-    type TestResult = Result<(), Box<dyn std::error::Error>>;
-
-    fn nonzero(value: u64) -> Result<NonZeroU64, CounterError> {
-        NonZeroU64::new(value).ok_or(CounterError::Zero)
-    }
-
-    /// The one `MintError` arm a test can reach, and only from in here: the
-    /// enum is `#[non_exhaustive]` so a caller outside has to write a wildcard
-    /// arm, which also means a caller outside cannot construct an arm to check
-    /// its rendering. `Entropy` needs the operating system to fail, so it is
-    /// covered by the type it carries rather than by a test.
-    #[cfg(feature = "ephemeral")]
-    #[test]
-    fn the_all_zero_mint_error_names_the_value_it_refused() {
-        let rendered = MintError::Zero.to_string();
-        assert!(
-            rendered.contains("all-zero"),
-            "an operator reading this cannot tell what was refused: {rendered}"
-        );
-        assert!(
-            std::error::Error::source(&MintError::Zero).is_none(),
-            "a refusal with no cause must not claim one"
-        );
-    }
-
-    fn key(attempt: u64, epoch: u64) -> Result<EffectKey, EffectKeyError> {
-        let key_run = RunId::from_hex(RUN)?;
-        let key_action = ActionId::from_hex(ACTION)?;
-        let key_attempt = AttemptId::new(nonzero(attempt)?);
-        let key_flow_revision = FlowRevision::from_tagged("blake3_256", FLOW_HEX)?;
-        let key_digest = ActionDigest::from_tagged("blake3_256", DIGEST_HEX)?;
-        let key_environment = EnvironmentId::from_hex(ENV)?;
-        let key_epoch = EnvironmentEpoch::new(nonzero(epoch)?);
-        Ok(
-            EffectIdentity::new(key_run, key_environment, key_flow_revision).key(
-                key_action,
-                key_attempt,
-                key_digest,
-                key_epoch,
-            ),
-        )
-    }
-
-    #[test]
-    fn id_round_trips_through_its_hex_form() -> TestResult {
-        let id = Id128::from_hex(RUN)?;
-        assert_eq!(id.to_hex(), RUN);
-        Ok(())
-    }
-
-    #[test]
-    fn id_round_trips_a_value_with_the_high_bit_set() -> TestResult {
-        // Big-endian means the first byte is the most significant; a value
-        // whose top bit is set is where a sign-confusion bug would show.
-        let text = "ffffffffffffffffffffffffffffffff";
-        let id = Id128::from_hex(text)?;
-        assert_eq!(id.to_hex(), text);
-        assert_eq!(id.get().get(), u128::MAX);
-        Ok(())
-    }
-
-    #[test]
-    fn id_rejects_the_all_zero_value() {
-        assert_eq!(
-            Id128::from_hex("00000000000000000000000000000000"),
-            Err(IdError::Zero)
-        );
-    }
-
-    #[test]
-    fn id_rejects_uppercase_rather_than_folding_it() -> TestResult {
-        let upper = RUN.to_uppercase();
-        // The offset is derived rather than hardcoded: the leading bytes of
-        // this constant are digits, which are valid hex in either case, so the
-        // first refusal lands wherever the first letter happens to be.
-        match Id128::from_hex(&upper) {
-            Err(IdError::NotHex { at }) => {
-                assert!(
-                    upper.as_bytes()[at].is_ascii_uppercase(),
-                    "offset {at} does not name the uppercase byte"
-                );
-            }
-            other => return Err(format!("expected a NotHex refusal, got {other:?}").into()),
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn id_reports_the_observed_length_not_a_rebased_offset() {
-        assert_eq!(
-            Id128::from_hex("abcd"),
-            Err(IdError::WrongLength { len: 4 })
-        );
-    }
-
-    #[test]
-    fn id_rejects_a_non_ascii_input_without_panicking() {
-        // Exactly 32 bytes of UTF-8, so the length check passes and the byte
-        // check is what has to catch it.
-        let text = "é".repeat(16);
-        assert_eq!(text.len(), 32);
-        assert_eq!(Id128::from_hex(&text), Err(IdError::NotHex { at: 0 }));
-    }
-
-    #[test]
-    fn id_accepts_a_nonzero_value_by_construction() {
-        let id = Id128::from_nonzero(NonZeroU128::MIN);
-        assert_eq!(id.get().get(), 1);
-        assert_eq!(id.to_hex(), "00000000000000000000000000000001");
-    }
-
-    #[test]
-    fn every_id_role_parses_the_same_wire_form() -> TestResult {
-        let run = RunId::from_hex(RUN)?;
-        let action = ActionId::from_hex(RUN)?;
-        let environment = EnvironmentId::from_hex(RUN)?;
-        // The same 32 bytes, three types. That is the point of the newtypes: a
-        // call site that swaps them does not compile, which is not something a
-        // runtime assertion here could establish.
-        assert_eq!(run.id(), action.id());
-        assert_eq!(action.id(), environment.id());
-        assert_eq!(run.to_string(), RUN);
-        Ok(())
-    }
-
-    #[test]
-    fn attempt_rejects_zero_and_non_decimal() {
-        assert_eq!(AttemptId::from_decimal("0"), Err(CounterError::Zero));
-        assert_eq!(AttemptId::from_decimal(""), Err(CounterError::NotDecimal));
-        assert_eq!(AttemptId::from_decimal("1a"), Err(CounterError::NotDecimal));
-        assert_eq!(AttemptId::from_decimal("-1"), Err(CounterError::NotDecimal));
-        assert_eq!(
-            AttemptId::from_decimal("18446744073709551616"),
-            Err(CounterError::Overflow)
-        );
-        assert_eq!(AttemptId::from_decimal("42").map(AttemptId::get), Ok(42));
-    }
-
-    #[test]
-    fn attempt_refuses_to_wrap_rather_than_reusing_an_identity() {
-        let last = AttemptId::new(NonZeroU64::MAX);
-        assert!(last.is_exhausted());
-        assert_eq!(last.checked_next(), None);
-        assert_eq!(AttemptId::FIRST.get(), 1);
-        assert_eq!(AttemptId::FIRST.checked_next().map(AttemptId::get), Some(2));
-    }
-
-    #[test]
-    fn the_two_counter_roles_keep_their_own_names() {
-        assert_eq!(AttemptId::role(), "attempt");
-        assert_eq!(EnvironmentEpoch::role(), "environment epoch");
-        assert_eq!(EnvironmentEpoch::FIRST.to_string(), "1");
-    }
-
-    #[test]
-    fn a_sha256_tag_is_unsupported_rather_than_malformed() {
-        assert!(matches!(
-            ActionDigest::from_tagged("sha256", DIGEST_HEX),
-            Err(DigestError::UnsupportedAlgorithm {
-                algorithm: DigestAlgorithm::Sha256
-            })
-        ));
-        assert!(matches!(
-            ActionDigest::from_tagged("md5", DIGEST_HEX),
-            Err(DigestError::UnknownAlgorithm)
-        ));
-    }
-
-    #[test]
-    fn a_malformed_digest_body_is_distinct_from_an_unsupported_tag() {
-        assert!(matches!(
-            ActionDigest::from_tagged("blake3_256", "nothex"),
-            Err(DigestError::Malformed(
-                lgwks_std::hash::DigestParseError::WrongLength { len: 6 }
-            ))
-        ));
-    }
-
-    #[test]
-    fn the_two_digest_roles_carry_the_same_algorithm_tag() {
-        assert_eq!(FlowRevision::algorithm(), DigestAlgorithm::Blake3_256);
-        assert_eq!(ActionDigest::algorithm().as_str(), "blake3_256");
-        assert_eq!(FlowRevision::role(), "flow revision");
-        assert_eq!(ActionDigest::role(), "action digest");
-    }
-
-    #[test]
-    fn a_key_round_trips_every_field() -> TestResult {
-        let bound = key(3, 7)?;
-        assert_eq!(bound.run().to_string(), RUN);
-        assert_eq!(bound.action().to_string(), ACTION);
-        assert_eq!(bound.attempt().get(), 3);
-        assert_eq!(bound.flow().to_hex(), FLOW_HEX);
-        assert_eq!(bound.digest().to_hex(), DIGEST_HEX);
-        assert_eq!(bound.environment().to_string(), ENV);
-        assert_eq!(bound.epoch().get(), 7);
-        Ok(())
-    }
-
-    #[test]
-    fn with_attempt_moves_only_the_attempt() -> TestResult {
-        let base = key(1, 4)?;
-        let next = base.with_attempt(AttemptId::new(nonzero(2)?));
-        assert_ne!(base, next);
-        assert_eq!(base.run(), next.run());
-        assert_eq!(base.action(), next.action());
-        assert_eq!(base.flow(), next.flow());
-        assert_eq!(base.digest(), next.digest());
-        assert_eq!(base.environment(), next.environment());
-        assert_eq!(base.epoch(), next.epoch());
-        assert_eq!(next.attempt().get(), 2);
-        Ok(())
-    }
-
-    #[test]
-    fn an_epoch_bump_under_one_command_is_recognised() -> TestResult {
-        let prepared = key(1, 4)?;
-        let after_restart = key(1, 5)?;
-        assert!(prepared.same_attempt_earlier_epoch(after_restart));
-        assert!(!after_restart.same_attempt_earlier_epoch(prepared));
-        Ok(())
-    }
-
-    #[test]
-    fn a_different_input_digest_is_a_different_key_and_not_an_epoch_move() -> TestResult {
-        let base = key(1, 4)?;
-        let moved = EffectIdentity::new(base.run(), base.environment(), base.flow()).key(
-            base.action(),
-            base.attempt(),
-            ActionDigest::from_tagged(
-                "blake3_256",
-                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e2f",
-            )?,
-            EnvironmentEpoch::new(nonzero(5)?),
-        );
-        assert_ne!(base.digest(), moved.digest());
-        assert!(!base.same_attempt_earlier_epoch(moved));
-        Ok(())
-    }
-
-    #[test]
-    fn a_key_renders_every_field_for_a_refusal_message() -> TestResult {
-        let rendered = key(2, 9)?.to_string();
-        assert!(rendered.contains(RUN), "{rendered}");
-        assert!(rendered.contains("attempt 2"), "{rendered}");
-        assert!(rendered.contains("epoch 9"), "{rendered}");
-        assert!(rendered.contains("env "), "{rendered}");
-        Ok(())
-    }
-}
-
-/// How an admitted observation is named for the purpose of a dispatch digest.
-///
-/// A content identity, not an event number: the same value of the same type
-/// writes the same bytes (so a restart can retire work that already landed),
-/// and a different value writes different ones (so a restart cannot read new
-/// work as already applied). Two *events* with equal content must still be
-/// distinguishable — content equality is not event identity — so a caller that
-/// needs that puts the event id into the value and into this trait. See
-/// [`EventId`].
-///
-/// Every integer writes `to_le_bytes` of a fixed width, so a 32-bit and a
-/// 64-bit target derive the same identity (issue #101).
-///
-/// # The schema id is the durable name of the type (issue #118)
-///
-/// [`SCHEMA_ID`](Self::SCHEMA_ID) is what binds identity bytes to a type, and
-/// it is a *declared* versioned string, never `std::any::type_name`. Rust
-/// documents `type_name` as diagnostic: its format is unspecified and it may
-/// change between compiler versions, so a module rename or a toolchain upgrade
-/// would silently give every admitted event a new identity and resurrect
-/// settled work as fresh. A declared id survives all of that; a *changed* id
-/// is an explicit schema migration whose identities differ by construction —
-/// recovered work under the old id is refused as superseded rather than
-/// silently folded. `type_name` remains in use only where a human reads it
-/// (diagnostics), never inside a digest.
-pub trait InputIdentity {
-    /// The versioned schema identity of `Self`, declared by the type's author.
-    ///
-    /// Convention: `lgwks.bot.schema.v1.<kind>`, lowercased, stable across
-    /// builds and compilers. Bump the version when the identity *bytes* change
-    /// meaning — that bump is the migration boundary, and identities across it
-    /// are distinct by construction.
-    const SCHEMA_ID: &'static [u8];
-
-    /// Write this input's canonical identity bytes into `hasher`.
-    ///
-    /// Variable-length parts go through [`Hasher::write_framed`] so the
-    /// stream's field boundaries are part of the digest.
-    fn write_identity(&self, hasher: &mut Hasher);
-
-    /// Whether these identity bytes name an *event*, rather than only content.
-    ///
-    /// The two readings of a returning identity are different questions and
-    /// only one of them is right for a given type (issue #129).
-    ///
-    /// - `true` — the bytes name an event, so equal bytes mean the same event
-    ///   has come back. That is a redelivery of work that already landed, and
-    ///   it retires however many other episodes came between. [`EventId`] is
-    ///   this: its identity carries the caller's event id.
-    /// - `false` (the default) — the bytes name only content, so a state watch
-    ///   returning to a previous value is a *new* episode of work rather than a
-    ///   redelivery. It runs again. Only the value the last applied episode
-    ///   carried retires, which is what keeps a restart from double-firing on
-    ///   an unchanged source while a `0 → 1 → 0` watch still fires three times.
-    ///
-    /// Defaulting to `false` is deliberate: a type that has not claimed event
-    /// identity gets the state-transition semantics the watch contract
-    /// documents, and opting into `true` is a statement about the type.
-    fn names_an_event(&self) -> bool {
-        false
-    }
-}
-
-/// Implement [`InputIdentity`] for a fixed-width integer via `to_le_bytes`.
-macro_rules! input_identity_int {
-    ($($t:ty => $name:literal),* $(,)?) => {$(
-        impl InputIdentity for $t {
-            const SCHEMA_ID: &'static [u8] =
-                concat!("lgwks.bot.schema.v1.int-", $name).as_bytes();
-            fn write_identity(&self, hasher: &mut Hasher) {
-                hasher.update(&self.to_le_bytes());
-            }
-        }
-    )*};
-}
-
-input_identity_int!(
-    u8 => "u8",
-    u16 => "u16",
-    u32 => "u32",
-    u64 => "u64",
-    i8 => "i8",
-    i16 => "i16",
-    i32 => "i32",
-    i64 => "i64",
-);
-
-impl InputIdentity for bool {
-    const SCHEMA_ID: &'static [u8] = b"lgwks.bot.schema.v1.bool";
-
-    fn write_identity(&self, hasher: &mut Hasher) {
-        hasher.update(&[u8::from(*self)]);
-    }
-}
-
-impl InputIdentity for String {
-    const SCHEMA_ID: &'static [u8] = b"lgwks.bot.schema.v1.string";
-
-    fn write_identity(&self, hasher: &mut Hasher) {
-        hasher.write_framed(self.as_bytes());
-    }
-}
-
-impl InputIdentity for &str {
-    const SCHEMA_ID: &'static [u8] = b"lgwks.bot.schema.v1.string";
-
-    fn write_identity(&self, hasher: &mut Hasher) {
-        hasher.write_framed(self.as_bytes());
-    }
-}
+mod tests;
 
 /// A value tagged with an event id, so two equal payloads stay two events.
 ///
@@ -1469,25 +980,5 @@ impl<T> EventId<T> {
     #[must_use]
     pub const fn value(&self) -> &T {
         &self.value
-    }
-}
-
-impl<T: InputIdentity> InputIdentity for EventId<T> {
-    const SCHEMA_ID: &'static [u8] = b"lgwks.bot.schema.v1.event-id";
-
-    fn write_identity(&self, hasher: &mut Hasher) {
-        // The payload's own schema travels inside the stream: two wrappers
-        // over different payload types stay distinct identities even when
-        // their ids and payload bytes coincide, which the erased
-        // `type_name`-based scheme could only tell apart unreliably.
-        hasher.write_framed(T::SCHEMA_ID);
-        hasher.update(&self.id.to_le_bytes());
-        self.value.write_identity(hasher);
-    }
-
-    /// The id is written into the identity, so equal identity bytes really do
-    /// mean the same event. A returning one is a redelivery and retires.
-    fn names_an_event(&self) -> bool {
-        true
     }
 }

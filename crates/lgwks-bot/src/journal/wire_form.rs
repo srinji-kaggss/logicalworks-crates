@@ -43,18 +43,16 @@ use super::Verification;
 /// Both arms are recorded. A predicate that was evaluated and did not hold is a
 /// fact about the run, and discarding it would leave the report unable to say
 /// why an action was not verified.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    lgwks_std::wire::Archive,
-    lgwks_std::wire::Serialize,
-    lgwks_std::wire::Deserialize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "wire",
+    derive(
+        lgwks_std::wire::Archive,
+        lgwks_std::wire::Serialize,
+        lgwks_std::wire::Deserialize
+    )
 )]
-#[rkyv(attr(non_exhaustive), crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
+#[cfg_attr(feature = "wire", rkyv(attr(non_exhaustive), crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug)))]
 #[non_exhaustive]
 pub enum VerificationResult {
     /// The predicate held.
@@ -71,24 +69,21 @@ pub enum VerificationResult {
 /// ladder in [`EventKind::next`](crate::journal::EventKind::next) is enforced at
 /// the append point, so an event that cannot follow what is already committed is
 /// refused rather than stored.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    lgwks_std::wire::Archive,
-    lgwks_std::wire::Serialize,
-    lgwks_std::wire::Deserialize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "wire",
+    derive(
+        lgwks_std::wire::Archive,
+        lgwks_std::wire::Serialize,
+        lgwks_std::wire::Deserialize
+    )
 )]
-#[rkyv(attr(non_exhaustive), crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
+#[cfg_attr(feature = "wire", rkyv(attr(non_exhaustive), crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug)))]
 #[non_exhaustive]
 pub enum EffectEvent {
     /// The intent was frozen and admitted, before any authority was sought.
     IntentAdmitted {
         /// The attempt this fact is about.
-        #[rkyv(attr(doc = "The attempt this fact is about."))]
         key: EffectKey,
     },
     /// Authority was obtained and this exact attempt was prepared for handoff.
@@ -98,25 +93,20 @@ pub enum EffectEvent {
     /// must treat the outcome as unknown until evidence settles it.
     DispatchPrepared {
         /// The attempt this fact is about.
-        #[rkyv(attr(doc = "The attempt this fact is about."))]
         key: EffectKey,
     },
     /// What the evidence says about whether the effect landed.
     OutcomeObserved {
         /// The attempt this fact is about.
-        #[rkyv(attr(doc = "The attempt this fact is about."))]
         key: EffectKey,
         /// The fact the caller established.
-        #[rkyv(attr(doc = "The fact the caller established."))]
         evidence: EffectEvidence,
     },
     /// A named predicate was evaluated over observations newer than the effect.
     Verified {
         /// The attempt this fact is about.
-        #[rkyv(attr(doc = "The attempt this fact is about."))]
         key: EffectKey,
         /// The predicate, its version, its input and its answer.
-        #[rkyv(attr(doc = "The predicate, its version, its input and its answer."))]
         verification: Verification,
     },
 }

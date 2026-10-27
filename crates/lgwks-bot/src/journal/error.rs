@@ -3,11 +3,13 @@
 use core::fmt;
 use std::io;
 
+#[cfg(feature = "wire")]
 use lgwks_std::wire::WireError;
 
+#[cfg(feature = "wire")]
+use super::Corruption;
 use super::{
-    Corruption, DurabilityPromise, EffectEvent, EventKind, JournalLimitKind, JournalPosition,
-    SealPause,
+    DurabilityPromise, EffectEvent, EventKind, JournalLimitKind, JournalPosition, SealPause,
 };
 use crate::effect::EffectKey;
 
@@ -187,6 +189,7 @@ pub enum JournalError {
     /// the encoding allocates, and this is that allocation failing. Named
     /// rather than folded into [`Self::Storage`] because nothing was stored —
     /// the append is refused before the journal is touched at all.
+    #[cfg(feature = "wire")]
     Encoding(WireError),
     /// The journal's committed bytes do not re-derive the history they claim.
     ///
@@ -200,6 +203,10 @@ pub enum JournalError {
     /// Boxed for the same reason [`Self::OutOfOrder`] boxes its key: an error
     /// carrying the payload by value would make every `Result` in this module
     /// pay for a case that is refused before it changes anything.
+    ///
+    /// Only the file journal reads committed bytes back, so the variant exists
+    /// where it does: with `wire`.
+    #[cfg(feature = "wire")]
     Corrupt(Box<Corruption>),
 }
 
@@ -294,12 +301,14 @@ impl fmt::Display for JournalError {
                 "journal append may have committed, acknowledgment lost: {cause}; \
                  reconcile by readback rather than re-appending"
             ),
+            #[cfg(feature = "wire")]
             Self::Encoding(ref cause) => {
                 write!(
                     f,
                     "journal could not encode the event for the chain: {cause}"
                 )
             }
+            #[cfg(feature = "wire")]
             Self::Corrupt(ref corruption) => {
                 write!(f, "journal refused its own committed bytes: {corruption}")
             }
@@ -312,7 +321,9 @@ impl std::error::Error for JournalError {
         match *self {
             Self::Storage(ref cause) => Some(cause),
             Self::OutcomeUnknown { ref cause } => Some(cause),
+            #[cfg(feature = "wire")]
             Self::Encoding(ref cause) => Some(cause),
+            #[cfg(feature = "wire")]
             Self::Corrupt(ref cause) => Some(cause),
             _ => None,
         }

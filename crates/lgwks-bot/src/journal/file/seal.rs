@@ -1,8 +1,10 @@
 //! Continue-as-new on disk: how a handle was opened, the ladder hold, writing and syncing the successor, and the seal step.
 
+#[cfg(feature = "wire")]
+use super::{Continuation, HEAD_BYTES, LENGTH_BYTES, MAX_FRAME_BYTES, Prefix};
 use super::{
-    Continuation, ContinuationPolicy, EventKind, File, HEAD_BYTES, HashMap, LENGTH_BYTES,
-    MAX_FRAME_BYTES, OpenOptions, Path, Prefix, SealOutcome, SealPause, Write, fence_and_write,
+    ContinuationPolicy, EventKind, File, HashMap, OpenOptions, Path, SealOutcome, SealPause, Write,
+    fence_and_write,
 };
 
 /// Which constructor a handle came in through.
@@ -69,6 +71,7 @@ pub(super) fn ladder_hold(
 /// torn first frame reads as *not complete* rather than as a decode failure: this
 /// question is "did the continuation commit?", and a half-written file is the
 /// answer "no", not an error.
+#[cfg(feature = "wire")]
 pub(super) fn successor_is_complete(successor: &Path, seal: &Continuation) -> bool {
     let Ok(mut file) = OpenOptions::new().read(true).open(successor) else {
         return false;

@@ -42,5 +42,6 @@ Prose review does not catch a missing field; a refusal does.
 | [0004](0004-documentation-governance.md) | ADRs are 42010, PRDs are 29148, both machine-checked |
 | [0005](0005-bot-core-is-an-event-driven-ecs.md) | The bot core is an event-driven ECS; tokio and the executors are drivers below it (superseded by 0006) |
 | [0006](0006-one-ecs-world-one-tokio-axum-driver.md) | One ECS world is the core; one driver on tokio and axum carries events in and effects out |
+| [0007](0007-process-only-defaults.md) | Process-only defaults hold without the substrate |
 
 New records go at the bottom of that table.

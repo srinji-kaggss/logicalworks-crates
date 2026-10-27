@@ -27,10 +27,15 @@
 //! acknowledged and are refused. The two are byte-identical to a reader that only
 //! looks at the prefix, which is why the prefix alone never decides anything.
 
-use std::io::{Read, Seek, SeekFrom};
+#[cfg(any(feature = "wire", feature = "process"))]
+use std::io::Read;
+#[cfg(feature = "wire")]
+use std::io::{Seek, SeekFrom};
 
+#[cfg(feature = "wire")]
 use lgwks_std::hash::Digest;
 
+#[cfg(any(feature = "wire", feature = "process"))]
 use super::JournalError;
 
 /// A narrowing conversion that saturates instead of failing.
@@ -137,6 +142,7 @@ impl SaturatingFrom<usize> for u8 {
 /// reader whose first `read` returns a few bytes is not at end of file, and
 /// treating it as such would silently truncate a record that was merely
 /// fragmented across reads.
+#[cfg(any(feature = "wire", feature = "process"))]
 pub(crate) fn read_exact_or_eof(
     reader: &mut impl Read,
     buf: &mut [u8],
@@ -162,12 +168,15 @@ pub(crate) fn read_exact_or_eof(
 ///
 /// A `u32`, because that is what both stores write and what a reader that has
 /// to be stream-bounded can decode without a full record in hand.
+#[cfg(any(feature = "wire", feature = "process"))]
 pub(crate) const LENGTH_BYTES: usize = 4;
 
 /// The byte width of a frame's stored head.
+#[cfg(feature = "wire")]
 pub(crate) const HEAD_BYTES: usize = 32;
 
 /// How a fixed-size piece of a frame's bytes ended.
+#[cfg(feature = "wire")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Piece {
     /// The buffer filled: the piece is whole.
@@ -183,6 +192,7 @@ pub(crate) enum Piece {
 /// the device refusing and travels unchanged as the caller's own refusal: a fault
 /// is not evidence that the bytes after it were never written, and treating it as
 /// one would authorize repair over bytes that may be acknowledged.
+#[cfg(feature = "wire")]
 pub(crate) fn read_piece(reader: &mut impl Read, buf: &mut [u8]) -> Result<Piece, std::io::Error> {
     match reader.read_exact(buf) {
         Ok(()) => Ok(Piece::Filled),
@@ -192,6 +202,7 @@ pub(crate) fn read_piece(reader: &mut impl Read, buf: &mut [u8]) -> Result<Piece
 }
 
 /// How a length prefix read ended.
+#[cfg(feature = "wire")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Prefix {
     /// Nothing at all: a clean end of records.
@@ -210,6 +221,7 @@ pub(crate) enum Prefix {
 /// into a buffer of exactly [`LENGTH_BYTES`] and counting is what tells them apart
 /// without trusting the bytes' values — a torn write whose bytes happened to be
 /// zero is still an interrupted append, and must be trimmed as one.
+#[cfg(feature = "wire")]
 pub(crate) fn read_prefix(
     reader: &mut impl Read,
     buf: &mut [u8; LENGTH_BYTES],
@@ -235,6 +247,7 @@ pub(crate) fn read_prefix(
 }
 
 /// The payload length a whole prefix declares.
+#[cfg(any(feature = "wire", feature = "process"))]
 pub(crate) fn declared_length(prefix: &[u8; LENGTH_BYTES]) -> usize {
     usize::saturating_from(u32::from_be_bytes(*prefix))
 }
@@ -244,6 +257,7 @@ pub(crate) fn declared_length(prefix: &[u8; LENGTH_BYTES]) -> usize {
 /// A zero-length frame is never written, and a length past a store's own ceiling
 /// names a frame that store does not produce. A complete prefix carrying one is
 /// rot or a hand, not an interrupted append, and is refused rather than trimmed.
+#[cfg(any(feature = "wire", feature = "process"))]
 pub(crate) fn is_possible_length(payload_len: usize, max_frame_bytes: usize) -> bool {
     payload_len != 0 && payload_len <= max_frame_bytes
 }
@@ -255,6 +269,7 @@ pub(crate) fn is_possible_length(payload_len: usize, max_frame_bytes: usize) -> 
 /// question: representable in a `u32`, and within the store's own ceiling. A store
 /// that asked `is_possible_length` and then did the conversion itself would have
 /// two answers to one question, and the second could disagree with the first.
+#[cfg(feature = "wire")]
 pub(crate) fn writable_length(payload_len: usize, max_frame_bytes: usize) -> Option<u32> {
     u32::try_from(payload_len)
         .ok()
@@ -262,6 +277,7 @@ pub(crate) fn writable_length(payload_len: usize, max_frame_bytes: usize) -> Opt
 }
 
 /// The bytes one frame occupies: prefix, payload, head.
+#[cfg(feature = "wire")]
 pub(crate) fn framed_len(payload_len: usize) -> u64 {
     u64::saturating_from(
         LENGTH_BYTES
@@ -283,6 +299,7 @@ pub(crate) fn framed_len(payload_len: usize) -> u64 {
 /// own ceiling first, and that check is what makes the conversion safe. Taking the
 /// proof as an argument rather than repeating it is what keeps one definition of
 /// what a frame is from becoming two.
+#[cfg(feature = "wire")]
 pub(crate) fn encode(payload_len: u32, payload: &[u8], head: &Digest) -> Vec<u8> {
     let claimed = usize::saturating_from(payload_len);
     debug_assert_eq!(
@@ -315,6 +332,7 @@ pub(crate) fn encode(payload_len: u32, payload: &[u8], head: &Digest) -> Vec<u8>
 ///
 /// Whatever `archive` reports, or whatever `refuse` reports for a payload past
 /// `max_frame_bytes`.
+#[cfg(feature = "wire")]
 pub(crate) fn frame_record<R, A, H, C, E>(
     record: &R,
     previous: &Digest,
@@ -380,6 +398,7 @@ where
 /// examines each offset once. A hostile tail can make the second search hash a
 /// candidate per offset (quadratic in that bound, a fraction of a second at the
 /// journal's 64 KiB ceiling) and no more.
+#[cfg(feature = "wire")]
 pub(crate) fn holds_acknowledged_frame<H>(
     suffix: &[u8],
     previous: &Digest,
@@ -450,6 +469,7 @@ where
 }
 
 /// Whether a whole frame that begins at `at` in `suffix` chains from `previous`.
+#[cfg(feature = "wire")]
 fn frame_chains_from(
     suffix: &[u8],
     at: usize,
@@ -497,6 +517,7 @@ fn frame_chains_from(
 ///
 /// Whatever `storage` makes of the device's refusal, or of the file having grown
 /// past what a cut frame could leave.
+#[cfg(feature = "wire")]
 pub(crate) fn cut_holds_acknowledged<R, E, H>(
     file: &mut R,
     offset: u64,
@@ -574,6 +595,7 @@ pub(crate) struct Raw {
 /// the payload itself" is the whole contract, and an `Option` let the decoding
 /// site write `copy.unwrap_or(payload)` — a substituted value, in the one place
 /// where reading the wrong bytes means decoding rot as a record.
+#[cfg(feature = "wire")]
 pub(crate) enum Decodable<'a> {
     /// The caller's own bytes: they already sit at an archive-aligned offset.
     Borrowed(&'a [u8]),
@@ -581,6 +603,7 @@ pub(crate) enum Decodable<'a> {
     Copied(lgwks_std::wire::AlignedVec),
 }
 
+#[cfg(feature = "wire")]
 impl<'a> Decodable<'a> {
     /// The bytes to decode from, whichever of the two this is.
     pub(crate) fn as_slice(&self) -> &[u8] {
@@ -595,6 +618,7 @@ impl<'a> Decodable<'a> {
 }
 
 /// The bytes `payload` may be decoded from, copying only when it must.
+#[cfg(feature = "wire")]
 pub(crate) fn decodable(payload: &[u8]) -> Decodable<'_> {
     const ARCHIVE_ALIGN: usize = 16;
     if payload.as_ptr().align_offset(ARCHIVE_ALIGN) == 0 {
@@ -686,6 +710,7 @@ where
 /// Byte surgery on a framed file, which every store's tail tests share: where the
 /// frames begin, what a prefix declares, and a file with one prefix changed.
 #[cfg(test)]
+#[cfg(feature = "wire")]
 pub(crate) mod probe {
     use super::{LENGTH_BYTES, framed_len};
     #[cfg(feature = "script")]
@@ -796,4 +821,5 @@ pub(crate) mod probe {
 }
 
 #[cfg(test)]
+#[cfg(feature = "wire")]
 mod tests;

@@ -10,7 +10,7 @@
 //! covers is the other half of the contract — a bot whose verbs await
 //! reactor-free futures still runs a whole tick on the thread-parking executor,
 //! and the crate's four verbs are not secretly runtime-dependent.
-#![cfg(not(feature = "rt"))]
+#![cfg(all(not(feature = "rt"), feature = "ecs"))]
 
 use std::cell::RefCell;
 use std::rc::Rc;

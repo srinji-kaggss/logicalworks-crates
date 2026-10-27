@@ -11,6 +11,7 @@ where
 }
 
 /// Decode `text` as RON, with the decoder's diagnostic as a string.
+#[cfg(feature = "ron")]
 pub(super) fn parse_ron<T>(text: &str) -> Result<T, String>
 where
     T: serde::de::DeserializeOwned,
