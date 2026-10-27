@@ -122,6 +122,10 @@ rustix = { version = "1", default-features = false, features = ["std", "fs"], op
 [dev-dependencies]
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 tempfile = "3.20"
+
+# Not under Miri: ring is C and assembly, which Miri cannot build or run, and
+# only the integration tests use these; `cargo miri test --lib` never needs them.
+[target.'cfg(not(miri))'.dev-dependencies]
 # Throwaway test PKI, generated at test time: the shipped client needs a
 # private-CA peer that requires client certificates, and no workspace surface
 # serves TLS. Test-only; never links into a shipped artifact. rcgen issues the
