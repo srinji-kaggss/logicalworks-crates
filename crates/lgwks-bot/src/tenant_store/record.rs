@@ -1,21 +1,27 @@
 //! The store's own record: its archived form, the chain, the frame codec over the shared grammar, and replay into the index.
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
+#[cfg(feature = "wire")]
+use std::io::{Seek, SeekFrom};
 
 use lgwks_std::hash::{Digest, Hasher};
+#[cfg(feature = "wire")]
 use lgwks_std::wire::{
     AlignedVec, Archive, Deserialize, Serialize, WireError, from_bytes, to_bytes,
 };
 
+#[cfg(feature = "wire")]
+use super::MAX_FRAME_BYTES;
 use super::{
     DETAIL_NEVER_STARTED, DETAIL_UNKNOWN, HEADER_LEN, Index, KIND_ABANDON_RUN, KIND_BEGIN_RUN,
     KIND_FINISH_RUN, KIND_INIT_POLICY, KIND_LANE_DISPATCHED, KIND_LANE_ENDED, LANE_DISPATCHED,
-    LANE_ENDED, LANE_PENDING, LaneEntry, MAX_FRAME_BYTES, OUTCOME_UNKNOWN, OUTCOME_UNMEASURED,
-    RunEntry, RunStart, STORE_FORMAT, STORE_MAGIC, StoredClose, StoredPolicy, TenantStoreError,
-    VERSION_BYTE,
+    LANE_ENDED, LANE_PENDING, LaneEntry, OUTCOME_UNKNOWN, OUTCOME_UNMEASURED, RunEntry, RunStart,
+    STORE_FORMAT, STORE_MAGIC, StoredClose, StoredPolicy, TenantStoreError, VERSION_BYTE,
 };
-use crate::journal::frame::{self, HEAD_BYTES, LENGTH_BYTES, SaturatingFrom};
+use crate::journal::frame::SaturatingFrom;
+#[cfg(feature = "wire")]
+use crate::journal::frame::{self, HEAD_BYTES, LENGTH_BYTES};
 
 /// The chain digest a store starts from: 32 zero bytes hashed through the
 /// same framing as any record, so the first head is a real chain step and not
@@ -27,67 +33,45 @@ pub(super) fn genesis_head() -> Digest {
 }
 
 /// The record as it is archived and as its chain head is checked.
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[rkyv(
-    attr(non_exhaustive),
-    crate = lgwks_std::wire::rkyv,
-    compare(PartialEq),
-    derive(Debug)
-)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "wire", derive(Archive, Serialize, Deserialize))]
+#[cfg_attr(feature = "wire", rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug)))]
 pub(super) struct Stored {
     /// Which of the six record kinds this is.
-    #[rkyv(attr(doc = "Which of the six record kinds this is."))]
     kind: u8,
     /// The tenant the record belongs to.
-    #[rkyv(attr(doc = "The tenant the record belongs to."))]
     tenant: String,
     /// The run the record belongs to.
-    #[rkyv(attr(doc = "The run the record belongs to."))]
     run_id: String,
     /// The repository under test (begin only).
-    #[rkyv(attr(doc = "The repository under test (begin only)."))]
     repo: String,
     /// The coordinator's host (begin only).
-    #[rkyv(attr(doc = "The coordinator's host (begin only)."))]
     host: String,
     /// The coordinator's process id (begin only).
-    #[rkyv(attr(doc = "The coordinator's process id (begin only)."))]
     coordinator_pid: u32,
     /// The coordinator's lock (begin only).
-    #[rkyv(attr(doc = "The coordinator's lock (begin only)."))]
     coordinator_lock: String,
     /// The moment the record names: started, finished, or recorded.
-    #[rkyv(attr(doc = "The moment the record names: started, finished, or recorded."))]
     moment: String,
     /// The lane ids in plan order (begin only).
-    #[rkyv(attr(doc = "The lane ids in plan order (begin only)."))]
     lanes: Vec<String>,
     /// The lane position the record names (lane ops only).
-    #[rkyv(attr(doc = "The lane position the record names (lane ops only)."))]
     lane_idx: u64,
     /// The verdict (finish only).
-    #[rkyv(attr(doc = "The verdict (finish only)."))]
     verdict: String,
     /// The sealed record (finish only).
-    #[rkyv(attr(doc = "The sealed record (finish only)."))]
     record: String,
     /// The seal (finish only).
-    #[rkyv(attr(doc = "The seal (finish only)."))]
     seal: String,
     /// The outcome (lane end only).
-    #[rkyv(attr(doc = "The outcome (lane end only)."))]
     outcome: String,
     /// The detail (lane end only).
-    #[rkyv(attr(doc = "The detail (lane end only)."))]
     detail: String,
     /// The captured tail (lane end only).
-    #[rkyv(attr(doc = "The captured tail (lane end only)."))]
     tail: Vec<u8>,
     /// The gate set, exactly as recorded (policy only).
-    #[rkyv(attr(doc = "The gate set, exactly as recorded (policy only)."))]
     gates_json: String,
     /// The hardness level (policy only).
-    #[rkyv(attr(doc = "The hardness level (policy only)."))]
     hardness: u8,
 }
 
@@ -269,7 +253,7 @@ fn close_run(entry: &mut RunEntry, close: StoredClose) {
 /// refused it before framing — so a missing row returns without folding rather
 /// than inventing one. An unknown kind is rot, refused at read time rather
 /// than folded, because skipping would hand the caller a history with a hole
-/// in it. See [`next_frame`].
+/// in it. See `next_frame`.
 pub(super) fn fold(index: &mut Index, stored: &Stored) {
     if stored.kind == KIND_INIT_POLICY {
         index.policies.insert(
@@ -342,6 +326,7 @@ fn lane_slot<'a>(entry: &'a mut RunEntry, idx: &u64) -> Option<&'a mut LaneEntry
 
 /// The frame for one record: archive it, refuse it past the ceiling, chain its
 /// head, and lay it out through the estate's one frame grammar.
+#[cfg(feature = "wire")]
 pub(super) fn frame_record(
     stored: &Stored,
     previous: &Digest,
@@ -371,6 +356,7 @@ pub(super) fn frame_record(
 /// that does. This is the alignment half of the estate's frame reading, stated
 /// here because the shared helper travels behind the `script` gate and this
 /// store builds without it.
+#[cfg(feature = "wire")]
 fn decode_stored(payload: &[u8], at: u64) -> Result<Stored, TenantStoreError> {
     const ARCHIVE_ALIGN: usize = 16;
     let corrupt = || TenantStoreError::Corrupt { at };
@@ -451,6 +437,7 @@ fn is_known_kind(kind: u8) -> bool {
 /// frame this store never writes, a payload that does not decode, an unknown
 /// kind, or a head that does not follow is rot in acknowledged bytes and is
 /// refused.
+#[cfg(feature = "wire")]
 fn next_frame(
     file: &mut File,
     at: u64,
@@ -535,6 +522,7 @@ fn check_header(header: &[u8; HEADER_LEN]) -> Result<(), TenantStoreError> {
 /// about what folding a frame means. Bounded by `total`: every iteration
 /// consumes at least one byte, and a file that grows underneath cannot extend
 /// the drain.
+#[cfg(feature = "wire")]
 fn drain(
     file: &mut File,
     index: &mut Index,
@@ -557,6 +545,7 @@ fn drain(
 }
 
 /// Read every committed frame and fold the index it implies, from the start.
+#[cfg(feature = "wire")]
 pub(super) fn full_replay(file: &mut File, index: &mut Index) -> Result<(), TenantStoreError> {
     let total = file.metadata().map_err(TenantStoreError::storage)?.len();
     file.seek(SeekFrom::Start(0))
@@ -580,6 +569,7 @@ pub(super) fn full_replay(file: &mut File, index: &mut Index) -> Result<(), Tena
 ///
 /// Re-archived from the decoded record through the one grammar, so the reader
 /// and the accountant cannot disagree about what a frame is.
+#[cfg(feature = "wire")]
 fn frame_len_of(stored: &Stored, at: u64) -> Result<u64, TenantStoreError> {
     let payload = to_bytes::<WireError>(stored)
         .map(|bytes| bytes.as_ref().to_vec())
@@ -599,6 +589,7 @@ fn frame_len_of(stored: &Stored, at: u64) -> Result<u64, TenantStoreError> {
 /// When the file shrank under the index — another handle trimmed a torn tail
 /// this handle never saw — the offsets no longer line up and the only honest
 /// answer is a full replay from the start.
+#[cfg(feature = "wire")]
 pub(super) fn refresh(file: &mut File, index: &mut Index) -> Result<(), TenantStoreError> {
     let total = file.metadata().map_err(TenantStoreError::storage)?.len();
     if total < index.committed {

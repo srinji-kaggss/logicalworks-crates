@@ -199,3 +199,35 @@ fn the_storefront_matrix_default_graph_carries_no_optional_family() -> TestResul
     }
     Ok(())
 }
+
+/// A process-only `lgwks_bot` consumer compiles with `default-features = false`
+/// and carries none of the seven deselected crates (#687): the ECS substrate,
+/// the wire and RON encodings, the tracing installer, or the TLS/HTTP stack.
+#[test]
+fn proc_only_consumer_carries_no_deselected_crate() -> TestResult {
+    let manifest = fixtures().join("process-only/Cargo.toml");
+    let checked = cargo_check(&manifest, &[])?;
+    assert!(
+        checked.status.success(),
+        "process-only consumer failed:\n{}",
+        output_text(&checked)
+    );
+    let tree = cargo_tree_without_defaults(&manifest)?;
+    let tree_text = output_text(&tree);
+    assert!(tree.status.success(), "{tree_text}");
+    for absent in [
+        "bevy_ecs v",
+        "rkyv v",
+        "ron v",
+        "tracing-subscriber v",
+        "ureq v",
+        "rustls v",
+        "ring v",
+    ] {
+        assert!(
+            !tree_text.contains(absent),
+            "process-only tree contains deselected {absent}:\n{tree_text}"
+        );
+    }
+    Ok(())
+}

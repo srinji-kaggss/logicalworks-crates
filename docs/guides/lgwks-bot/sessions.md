@@ -34,7 +34,7 @@ runs under nextest with the rest of the suite. It builds a flow with one ask,
 `FlowSpec` is the document. It owns variable declarations, an entry node, a node
 map, explicit continuations, terminal overrides, and `FlowBounds`. `FlowSpec::new`
 validates on construction, and both parsers validate on parse
-(`crates/lgwks-bot/src/session/graph.rs:419`). `MAX_FLOW_BYTES` is 2,097,152, and input
+(`crates/lgwks-bot/src/session/graph.rs:421`). `MAX_FLOW_BYTES` is 2,097,152, and input
 past it is refused with `BotError::FlowTooLarge` before parsing runs.
 
 A flow can be written in JSON or in RON. RON is the estate's notation for
@@ -42,12 +42,12 @@ human-facing documents, so it is the one to reach for by hand: it takes
 comments, trailing commas and unquoted keys. The two are one document, and the
 size limit, the node-kind check and the structural validation are the same on
 both paths, so nothing is acceptable in one notation and refused in the other
-(`crates/lgwks-bot/src/session/graph.rs:419`). One diagnostic does read differently,
+(`crates/lgwks-bot/src/session/graph.rs:421`). One diagnostic does read differently,
 and the cause is the notation rather than the flow: JSON checks a variant name
 against nothing, so the guard names the node and the kind it carried, while RON
 checks the name against the variant list it is handed and refuses before our own
 visitor runs, so it names the variant and the enum but cannot name the node. Both
-refuse (`crates/lgwks-bot/src/session/graph.rs:452`).
+refuse (`crates/lgwks-bot/src/session/graph.rs:455`).
 
 ```ron
 // review-pr.flow.ron

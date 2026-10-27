@@ -1,5 +1,5 @@
-//! Structured, levelled logging and default debugger bootstrap (feature
-//! `trace`, default-on).
+//! Structured, levelled logging and default debugger bootstrap (features
+//! `trace` and `trace-install`, default-on).
 //!
 //! This module exists because this workspace forbids `println!`/`eprintln!` in
 //! library code and names `tracing` as the replacement, but `tracing` was
@@ -13,8 +13,9 @@
 //!
 //! # What is here, and what is not
 //!
-//! The **macros, core types, and default subscriber installer** are here, which
-//! is what calling code needs. The `attributes` feature is deliberately not
+//! The **macros and core types** are here, which is what calling code needs,
+//! and the **default subscriber installer** is behind `trace-install`, so a
+//! consumer that only emits does not compile the subscriber. The `attributes` feature is deliberately not
 //! enabled (see the note in `Cargo.toml`), so `#[instrument]` is unavailable
 //! from this path; it would pull `syn` into the foundation crate.
 //!
@@ -226,6 +227,7 @@ impl DebugConfig {
     }
 
     /// Installs this config as the process-global tracing subscriber.
+    #[cfg(feature = "trace-install")]
     pub fn install(self) -> Result<(), DebugInstallError> {
         self.validate()?;
         let filter = tracing_subscriber::EnvFilter::try_new(&self.filter).map_err(|source| {
@@ -260,6 +262,7 @@ impl DebugConfig {
     }
 
     /// Refuses a config that cannot identify the emitting service.
+    #[cfg(feature = "trace-install")]
     fn validate(&self) -> Result<(), DebugInstallError> {
         if self.service_name.trim().is_empty() {
             let refusal = Err(DebugInstallError::MissingServiceName);
@@ -272,6 +275,7 @@ impl DebugConfig {
 }
 
 /// Installs the default debugger from process environment.
+#[cfg(feature = "trace-install")]
 pub fn install_default(service_name: impl Into<String>) -> Result<(), DebugInstallError> {
     DebugConfig::from_env(service_name)?.install()
 }
@@ -295,6 +299,7 @@ pub enum DebugInstallError {
         value: String,
     },
     /// The filter directive could not be parsed.
+    #[cfg(feature = "trace-install")]
     InvalidFilter {
         /// Invalid filter directive.
         value: String,
@@ -319,6 +324,7 @@ impl fmt::Display for DebugInstallError {
                 formatter,
                 "{LOG_FORMAT_ENV} value {value:?} is not one of compact, pretty, json"
             ),
+            #[cfg(feature = "trace-install")]
             Self::InvalidFilter { ref value, .. } => {
                 write!(formatter, "trace filter {value:?} is invalid")
             }
@@ -336,6 +342,7 @@ impl Error for DebugInstallError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match *self {
             Self::InvalidEnvironment { ref source, .. } => Some(source),
+            #[cfg(feature = "trace-install")]
             Self::InvalidFilter { ref source, .. } => Some(source),
             Self::InstallFailed { ref source } => Some(source),
             Self::MissingServiceName | Self::InvalidFormat { .. } => None,

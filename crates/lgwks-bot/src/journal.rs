@@ -42,12 +42,13 @@
 use core::fmt;
 
 use lgwks_std::hash::{Digest, blake3};
+#[cfg(feature = "wire")]
 use lgwks_std::wire::{AlignedVec, WireError};
 
 use crate::effect::{EffectKey, Id128};
 use frame::SaturatingFrom;
 
-/// The evidence vocabulary is `crate::ecs`'s, re-exported here rather than
+/// The evidence vocabulary is the ledger's, re-exported here rather than
 /// restated.
 ///
 /// The journal and the ledger answer the same question, "what does the evidence
@@ -56,16 +57,20 @@ use frame::SaturatingFrom;
 /// keeps one definition with two consumers.
 pub use crate::ecs::EffectEvidence;
 
+#[cfg(feature = "wire")]
 use crate::BoxFuture;
 
 mod wire_form;
 
+#[cfg(feature = "wire")]
+pub use wire_form::{ArchivedEffectEvent, ArchivedVerificationResult};
 /// The two journal records whose archived form is an enum, re-exported from the
 /// private `wire_form` module, which records why they are declared there.
-pub use wire_form::{
-    ArchivedEffectEvent, ArchivedVerificationResult, EffectEvent, VerificationResult,
-};
+pub use wire_form::{EffectEvent, VerificationResult};
 
+/// The file journal persists every record through the wire encoding, so it
+/// exists only where `wire` is on (#687: a process-only build carries none).
+#[cfg(feature = "wire")]
 mod file;
 
 /// The frame grammar the file journal and the run store share.
@@ -81,7 +86,9 @@ pub(crate) mod frame;
 ///
 /// Extracted from `file` because the run store inherited the same blocking-write
 /// defect and needed the same mechanism, and a second owner thread beside the
-/// first would be two poison latches with two behaviours.
+/// first would be two poison latches with two behaviours. The poison-safe lock
+/// helpers it also holds serve the whole crate; the owner thread itself exists
+/// only with `wire`, which both stores persist through.
 pub(crate) mod owner;
 
 /// Continue-as-new: a sealed checkpoint and the successor opened from it.
@@ -106,6 +113,7 @@ pub use continuation::{
 /// serves both file-backed stores, so the gate is re-exported from its owning
 /// module below rather than from either store, and naming it here would make a
 /// caller believe the journal owns a type the run store shares.
+#[cfg(feature = "wire")]
 pub use file::{Corruption, CorruptionKind, FileJournal, Replay};
 
 /// The handle that releases a stalled store's parked flush.
@@ -114,6 +122,7 @@ pub use file::{Corruption, CorruptionKind, FileJournal, Replay};
 /// a question an operator has to be able to ask on a real process: the caller
 /// awaiting the append holds the journal's borrow for the whole wait, so it cannot
 /// reach the journal to release its own device.
+#[cfg(feature = "wire")]
 pub use owner::StorageGate;
 
 /// The domain separator hashed into the genesis position.
@@ -210,18 +219,16 @@ impl fmt::Display for DurabilityPromise {
 /// that diverged would agree on their sequence numbers. The head is a hash over
 /// every event up to and including this one, so a position is a commitment to
 /// the entire history behind it.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    lgwks_std::wire::Archive,
-    lgwks_std::wire::Serialize,
-    lgwks_std::wire::Deserialize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "wire",
+    derive(
+        lgwks_std::wire::Archive,
+        lgwks_std::wire::Serialize,
+        lgwks_std::wire::Deserialize
+    )
 )]
-#[rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
+#[cfg_attr(feature = "wire", rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug)))]
 pub struct JournalPosition {
     /// How many events are committed at or before this position. Zero is the
     /// genesis, which holds no events.
@@ -367,18 +374,16 @@ impl fmt::Display for VerificationResult {
 /// journal stays bounded, and as a digest rather than a summary so the answer
 /// cannot be re-read under a different input set. A bare "done" has no place
 /// here: it names no predicate, so nothing can re-evaluate it.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    lgwks_std::wire::Archive,
-    lgwks_std::wire::Serialize,
-    lgwks_std::wire::Deserialize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    feature = "wire",
+    derive(
+        lgwks_std::wire::Archive,
+        lgwks_std::wire::Serialize,
+        lgwks_std::wire::Deserialize
+    )
 )]
-#[rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug))]
+#[cfg_attr(feature = "wire", rkyv(crate = lgwks_std::wire::rkyv, compare(PartialEq), derive(Debug)))]
 pub struct Verification {
     /// Which predicate was evaluated.
     predicate: Id128,
@@ -473,6 +478,7 @@ impl EffectEvent {
     /// # Errors
     ///
     /// [`WireError`] if the archive cannot be allocated.
+    #[cfg(feature = "wire")]
     pub fn to_bytes(self) -> Result<AlignedVec, WireError> {
         lgwks_std::wire::to_bytes::<WireError>(&self)
     }
@@ -679,6 +685,7 @@ pub trait EffectJournal {
     /// refused before the event was written, and
     /// [`JournalError::OutcomeUnknown`] when the event may have committed and
     /// the acknowledgment was lost.
+    #[cfg(feature = "wire")]
     fn compare_and_append(
         &mut self,
         expected_tail: JournalPosition,
@@ -710,6 +717,7 @@ pub trait EffectJournal {
     ///
     /// Every [`JournalError`] [`Self::compare_and_append`] produces, from the
     /// same checks in the same order.
+    #[cfg(feature = "wire")]
     fn compare_and_append_async<'a>(
         &'a mut self,
         expected_tail: JournalPosition,
@@ -838,6 +846,7 @@ pub trait EffectJournal {
 }
 
 #[cfg(test)]
+#[cfg(feature = "wire")]
 mod tests;
 
 // The refusal vocabulary, recovery, and the chain check with the in-memory
@@ -849,10 +858,17 @@ mod recover;
 
 // The chain helpers the file adapter and the other stores share.
 #[cfg(test)]
+#[cfg(feature = "wire")]
 use memory::chain;
+#[cfg(feature = "wire")]
 pub(crate) use memory::chain_over_bytes;
-use memory::{check_append_order, next_allowed_of};
+#[cfg(feature = "wire")]
+use memory::check_append_order;
+#[cfg(feature = "wire")]
+use memory::next_allowed_of;
 
 pub use error::JournalError;
-pub use memory::{ChainBreak, MemoryJournal, verify_chain, verify_chain_from};
+pub use memory::{ChainBreak, MemoryJournal};
+#[cfg(feature = "wire")]
+pub use memory::{verify_chain, verify_chain_from};
 pub use recover::{Attempt, AttemptStatus, Recovered, Transition, recover, recover_continued};

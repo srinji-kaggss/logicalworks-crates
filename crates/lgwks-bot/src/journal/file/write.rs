@@ -1,11 +1,14 @@
 //! The write path: the fence, framing, the byte and event bounds, and the synced write both append paths share.
 
+#[cfg(feature = "wire")]
+use super::EffectJournal;
 use super::{
-    AttemptStatus, EffectEvent, EffectJournal, EventKind, FileJournal, HashMap, JournalEntry,
-    JournalError, JournalLimitKind, JournalPosition, MAX_FRAME_BYTES, MAX_JOURNAL_BYTES, PathBuf,
-    SaturatingFrom, SettledAttempt, UnresolvedAttempt, check_append_order, commit, successor_path,
-    write_refusal,
+    AttemptStatus, EffectEvent, EventKind, FileJournal, HashMap, JournalEntry, JournalError,
+    JournalLimitKind, JournalPosition, MAX_JOURNAL_BYTES, PathBuf, SaturatingFrom, SettledAttempt,
+    UnresolvedAttempt, commit, successor_path, write_refusal,
 };
+#[cfg(feature = "wire")]
+use super::{MAX_FRAME_BYTES, check_append_order};
 
 impl FileJournal {
     /// The one door both append paths take before they are allowed to write.
@@ -79,6 +82,7 @@ impl FileJournal {
     /// [`JournalError::Exhausted`] when the position cannot advance,
     /// [`JournalError::Encoding`] when the event cannot be archived, and
     /// [`JournalError::Storage`] when the frame is over the bound.
+    #[cfg(feature = "wire")]
     pub(super) fn frame(
         &self,
         event: &EffectEvent,
@@ -302,6 +306,7 @@ impl FileJournal {
     /// this handle is stale or the frame is over the bound, and
     /// [`JournalError::CapacityExceeded`] when the append is over an event or
     /// byte ceiling. Nothing is written by any of them.
+    #[cfg(feature = "wire")]
     pub(super) fn prepare_append(
         &self,
         expected_tail: JournalPosition,

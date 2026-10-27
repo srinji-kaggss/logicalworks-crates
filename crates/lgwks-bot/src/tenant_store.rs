@@ -571,6 +571,9 @@ fn lock_is_stale(path: &Path) -> Result<bool, TenantStoreError> {
 mod error;
 mod record;
 mod rows;
+// The operations: every record is a wire frame, so without `wire` there is
+// nothing to open, read or write (#687).
+#[cfg(feature = "wire")]
 mod store;
 
 use record::Stored;

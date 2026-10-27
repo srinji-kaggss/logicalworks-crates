@@ -3,6 +3,7 @@
 use std::fmt;
 use std::time::Duration;
 
+#[cfg(feature = "wire")]
 use lgwks_std::wire::WireError;
 
 /// Why the store refused.
@@ -39,6 +40,7 @@ pub enum TenantStoreError {
         at: u64,
     },
     /// A record could not be archived, or a frame did not decode.
+    #[cfg(feature = "wire")]
     Encoding {
         /// What the codec said.
         cause: WireError,
@@ -110,6 +112,7 @@ impl fmt::Display for TenantStoreError {
                 "tenant store frame {at} does not follow from the records before it; \
                  the bytes are refused, not trimmed"
             ),
+            #[cfg(feature = "wire")]
             Self::Encoding { ref cause } => {
                 write!(formatter, "a run record could not be archived: {cause}")
             }
@@ -160,6 +163,7 @@ impl std::error::Error for TenantStoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
             Self::Storage { ref cause } => Some(cause),
+            #[cfg(feature = "wire")]
             Self::Encoding { ref cause } => Some(cause),
             Self::NotAStore
             | Self::FormatVersion { .. }

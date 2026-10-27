@@ -115,18 +115,24 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "wire")]
+use super::check_append_order;
 use super::continuation::{
     Continuation, ContinuationPolicy, ContinuationWatermark, SealPause, SettledAttempt,
     UnresolvedAttempt, successor_path,
 };
-use super::frame::{HEAD_BYTES, LENGTH_BYTES, Piece, Prefix, SaturatingFrom, read_exact_or_eof};
+#[cfg(feature = "wire")]
+use super::frame::read_exact_or_eof;
+use super::frame::{HEAD_BYTES, LENGTH_BYTES, Piece, Prefix, SaturatingFrom};
+#[cfg(feature = "wire")]
+use super::next_allowed_of;
 use super::owner::{StorageGate, StorageOwner};
 use super::{
     AttemptStatus, ChainBreak, DurabilityPromise, DurableAck, EffectEvent, EffectEvidence,
     EffectJournal, EventKind, JournalEntry, JournalError, JournalLimitKind, JournalPosition,
-    MAX_JOURNAL_BYTES, MAX_JOURNAL_EVENTS, Recovered, check_append_order, next_allowed_of,
-    recover_continued,
+    MAX_JOURNAL_BYTES, MAX_JOURNAL_EVENTS, Recovered, recover_continued,
 };
+#[cfg(feature = "wire")]
 use lgwks_std::wire::{WireError, from_bytes};
 
 /// The largest frame this journal will read or write.
@@ -365,6 +371,7 @@ impl FileJournal {
     /// # Errors
     ///
     /// Every [`JournalError`] [`EffectJournal::continue_as_new`] reports.
+    #[cfg(feature = "wire")]
     pub fn continue_as_file(&mut self) -> Result<Option<Self>, JournalError> {
         if !self.continuation_continues() {
             return Ok(None);
@@ -465,6 +472,7 @@ impl FileJournal {
     /// [`JournalError::Exhausted`] when the position cannot advance,
     /// [`JournalError::Storage`] when the payload is past the frame bound, and
     /// whatever [`Self::fence`] reports, because a seal is a write like any other.
+    #[cfg(feature = "wire")]
     fn frame_payload(
         &self,
         payload: Vec<u8>,
@@ -509,6 +517,7 @@ impl FileJournal {
     /// # Errors
     ///
     /// Whatever [`FileJournal::open`] reports.
+    #[cfg(feature = "wire")]
     pub fn open_with_stalled_storage(path: impl AsRef<Path>) -> Result<Self, JournalError> {
         Self::open_impl(path.as_ref(), OpenKind::Stalled)
     }
@@ -573,6 +582,7 @@ impl FileJournal {
     /// is returned and no bytes are written; a failure of the write itself
     /// is [`JournalError::OutcomeUnknown`] — the frames may be on the disk
     /// with the reply lost — and the handle is poisoned until a reopen.
+    #[cfg(feature = "wire")]
     pub fn compare_and_append_all(
         &mut self,
         events: &[EffectEvent],
@@ -725,7 +735,13 @@ pub use replay::Replay;
 // The pieces the halves of the handle share across these files.
 use adapter::ReplayCursor;
 use replay::FileView;
-use scan::{ScanStop, Scanned, read_exact_classified, resolve_ambiguous_tail, scan, verify_frame};
+#[cfg(feature = "wire")]
+use scan::{ScanStop, Scanned, read_exact_classified};
+#[cfg(feature = "wire")]
+use scan::{resolve_ambiguous_tail, scan, verify_frame};
 #[cfg(test)]
 use seal::write_successor;
-use seal::{OpenKind, ladder_hold, seal_on_owner, successor_is_complete};
+#[cfg(feature = "wire")]
+use seal::{OpenKind, ladder_hold};
+#[cfg(feature = "wire")]
+use seal::{seal_on_owner, successor_is_complete};
