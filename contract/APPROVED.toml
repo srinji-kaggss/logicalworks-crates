@@ -30,11 +30,13 @@ repository = "https://github.com/srinji-kaggss/logicalworks-crates"
 # `accepted_licenses`: the SPDX identifiers an inbound dependency may carry —
 # the set the approved packages here already declare (Apache-2.0 and MIT are
 # also what these crates publish under); Zlib and BSD-3-Clause because Cargo
-# needs every identifier in an expression known, and both are permissive. Not
+# needs every identifier in an expression known, ISC because it is the same
+# permissive family as MIT (OpenBSD's licence; rustls carries it as one term
+# of its `Apache-2.0 OR ISC OR MIT`), and both are permissive. Not
 # accepted: GPL/AGPL (reciprocal), MPL-2.0 inbound (file-level copyleft), and
 # LicenseRef-* (a text this repository has not read). Widening is a reviewed
 # edit to this line.
-accepted_licenses = "0BSD, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-3-Clause, CC0-1.0, MIT, Unlicense, Zlib"
+accepted_licenses = "0BSD, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-3-Clause, CC0-1.0, ISC, MIT, Unlicense, Zlib"
 # `surfaces`: INV-DEP-1's closed set of workspace members and approval owners.
 surfaces = "lgwks_std, lgwks_bot, lgwks_deps, lgwks_ast, lgwks_macros"
 # `frozen_surfaces` / `frozen_tier`: the standalone lgwks_ast's approvals stay
@@ -602,3 +604,71 @@ reason = "The one durable store every estate service opens instead of declaring 
 approved_by = "Director"
 approved_on = "2026-10-26"
 review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/696"
+
+[[approved]]
+crate = "rcgen"
+tier = "boundary"
+version = "^0.14"
+license = "MIT OR Apache-2.0"
+owner = "lgwks_std"
+capability = "test.x509-issuance"
+source = "registry"
+allowed_consumers = "lgwks_std"
+allowed_kinds = "dev"
+uses_default_features = "false"
+features = "crypto, ring"
+reason = "Throwaway test PKI generated at test time for the lgwks_std::http TLS seam (#714): no committed keys, no openssl at test time; rcgen issues the CA, server and client certificates with SANs from generated keys (ring backend, no C++ toolchain)."
+approved_by = "maintainer"
+approved_on = "2026-10-26"
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/714"
+
+[[approved]]
+crate = "rsa"
+tier = "boundary"
+version = "^0.10.0-rc.19"
+license = "MIT OR Apache-2.0"
+owner = "lgwks_std"
+capability = "test.rsa-keygen"
+source = "registry"
+allowed_consumers = "lgwks_std"
+allowed_kinds = "dev"
+uses_default_features = "false"
+features = "std, encoding"
+reason = "Pure-Rust RSA key generation for the throwaway test PKI (#714): rcgen's ring backend cannot generate RSA keys, and aws-lc needs a C++ toolchain the Linux gate host may not carry; rsa generates the client and mismatch keys the correspondence tests need."
+approved_by = "maintainer"
+approved_on = "2026-10-26"
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/714"
+
+[[approved]]
+crate = "rand_core"
+tier = "boundary"
+version = "^0.10"
+license = "MIT OR Apache-2.0"
+owner = "lgwks_std"
+capability = "test.rng-facade"
+source = "registry"
+allowed_consumers = "lgwks_std"
+allowed_kinds = "dev"
+uses_default_features = "false"
+reason = "The RNG trait between the estate's seeded stream and rsa key generation in tests: the adapter implements rand_core::RngCore over lgwks_std::seeded so every test PKI replays from its seed; the trait must be named to be implemented."
+approved_by = "maintainer"
+approved_on = "2026-10-26"
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/714"
+
+[[approved]]
+crate = "rustls"
+tier = "boundary"
+version = "^0.23"
+license = "Apache-2.0 OR ISC OR MIT"
+owner = "lgwks_std"
+capability = "test.tls-loopback-server"
+source = "registry"
+allowed_consumers = "lgwks_std"
+allowed_kinds = "dev"
+uses_default_features = "false"
+features = "std, tls12, ring"
+reason = "Loopback TLS server for the lgwks_std::http mTLS end-to-end proof (#714): the shipped blocking client needs a private-CA peer that requires client certificates, and no workspace surface serves TLS; the edge is test-only and never links into a shipped artifact, unifying with the rustls ureq already carries."
+approved_by = "maintainer"
+approved_on = "2026-10-26"
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/714"
+

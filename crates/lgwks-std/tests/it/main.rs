@@ -27,6 +27,14 @@ mod json_attacks;
 #[path = "../support/leb128_attacks.rs"]
 mod leb128_attacks;
 
+#[cfg(feature = "http")]
+#[path = "../support/loopback.rs"]
+mod loopback;
+
+#[cfg(feature = "http")]
+#[path = "../support/pki.rs"]
+mod pki;
+
 #[path = "../support/rng.rs"]
 mod rng;
 
@@ -73,6 +81,9 @@ mod sim_glob_sweep;
 mod sim_hash;
 mod sim_hex;
 mod sim_http;
+mod sim_http_pool;
+mod sim_http_stream;
+mod sim_http_tls;
 mod sim_id;
 mod sim_id_v7;
 mod sim_join_all;

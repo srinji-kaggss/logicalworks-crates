@@ -1,0 +1,5 @@
+{
+  "requests": 200,
+  "pooled": {"p50_us": 44, "p95_us": 56, "p99_us": 67, "connections": 1},
+  "one_shot": {"p50_us": 117, "p95_us": 140, "p99_us": 153, "connections": 200}
+}

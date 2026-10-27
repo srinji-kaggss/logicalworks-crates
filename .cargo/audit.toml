@@ -41,4 +41,10 @@ ignore = [
   # paste: gpui -> image, metal; ml-candle -> candle-core, tokenizers 0.22;
   # ml-tokenizers -> tokenizers 0.23; reopen if any of the three features ships.
   "RUSTSEC-2024-0436",
+  # SECURITY.md, "`rsa 0.10.0-rc.19`: RUSTSEC-2023-0071": Marvin timing
+  # sidechannel on RSA decryption. Test-only lgwks_std dev edge for the #714
+  # throwaway PKI (fresh keys per run, loopback use, discarded after; only
+  # test-target parents); no fixed version exists. Reopen if a patched rsa
+  # appears or any non-test target depends on it.
+  "RUSTSEC-2023-0071",
 ]
