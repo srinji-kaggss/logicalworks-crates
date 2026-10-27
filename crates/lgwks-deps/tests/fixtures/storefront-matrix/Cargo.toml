@@ -8,6 +8,9 @@ edition = "2024"
 [features]
 default = ["appcui"]
 appcui = ["lgwks_deps/appcui"]
+axum = ["lgwks_deps/axum"]
+tower-http = ["lgwks_deps/tower-http"]
+llm-guard = ["lgwks_deps/llm-guard"]
 bevy-ecs = ["lgwks_deps/bevy-ecs"]
 gpui = ["lgwks_deps/gpui"]
 ml-candle = ["lgwks_deps/ml-candle"]
@@ -16,6 +19,9 @@ ml-tokenizers = ["lgwks_deps/ml-tokenizers"]
 sqlite = ["lgwks_deps/sqlite"]
 all-storefront = [
     "appcui",
+    "axum",
+    "tower-http",
+    "llm-guard",
     "bevy-ecs",
     "gpui",
     "ml-candle",
@@ -50,6 +56,15 @@ lgwks_deps = { path = "../../..", default-features = false }
 [[example]]
 name = "appcui"
 required-features = ["appcui"]
+[[example]]
+name = "axum"
+required-features = ["axum"]
+[[example]]
+name = "tower_http"
+required-features = ["tower-http"]
+[[example]]
+name = "llm_guard"
+required-features = ["llm-guard"]
 [[example]]
 name = "bevy_ecs"
 required-features = ["bevy-ecs"]

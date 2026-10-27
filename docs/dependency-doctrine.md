@@ -83,6 +83,13 @@ Before adding any edge:
    optional feature of `lgwks_deps`, run
    `cargo run -p lgwks_deps -- request <crate> <version>`, fill the block with
    `owner = "lgwks_deps"`, and commit. The commit is the approval.
+6. **Is it day 0?** The revenue slice admits 2–6 crates; everything else waits
+   for its measured trigger in the [deferral catalog](deferral.md). An approval
+   the catalog still defers is refused with the owner and the trigger.
+7. **Mortgage every edge.** Each approval carries a row in the companion
+   ledger `contract/LIFECYCLE.toml` naming `replacement`, `removal_trigger`
+   and `last_reviewed`; an approval with no row is refused as
+   `MissingLifecycle`. `lgwks-deps ledger` prints the review page the quarter closes on.
 
 A direct edge that skips this flow fails `lgwks-deps check` with the exact
 crate, requirement, and source class named.

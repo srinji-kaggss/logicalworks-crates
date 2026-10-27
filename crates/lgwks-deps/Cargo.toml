@@ -68,6 +68,13 @@ script = ["dep:proc-macro2"]
 # it is not in the default set.
 gpui = ["dep:gpui", "gpui/default"]
 appcui = ["dep:appcui"]
+# Day-0 revenue slice (#721): HTTP routing, HTTP middleware and the AI input
+# guard. Pure-Rust, permissive licences, default-off like every other
+# storefront group; the TLS the HTTP stack needs terminates at the OS reverse
+# proxy, so no TLS provider edge is admitted here (#728).
+axum = ["dep:axum"]
+tower-http = ["dep:tower-http"]
+llm-guard = ["dep:llm-guard"]
 # ML inference storefront. Candle is HuggingFace's minimalist Rust ML framework:
 # `ml-candle` brings tensor compute, NN layers, and the transformer model
 # registry; `ml-candle-metal` adds the macOS Metal backend to that set.
@@ -140,6 +147,14 @@ sqlite = ["dep:rusqlite"]
 lgwks_std = { workspace = true, default-features = false, features = ["core", "trace", "json"] }
 proc-macro2 = { version = "1", features = ["span-locations"], optional = true }
 quote = { version = "1", optional = true }
+# Day-0 revenue slice (#721): each edge is registered in contract/APPROVED.toml
+# with owner lgwks_deps, a replacement and a removal trigger. axum carries the
+# serving stack the slice proves (http1, tokio, json, tracing); tower-http the
+# middleware layers named in the issue; llm-guard the fuzzy scanner only, with
+# no model download. All default-features off.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "tracing"], optional = true }
+tower-http = { version = "0.7", default-features = false, features = ["cors", "trace", "compression-gzip", "compression-deflate"], optional = true }
+llm-guard = { version = "0.2", default-features = false, features = ["fuzzy"], optional = true }
 gpui = { version = "0.2", optional = true }
 appcui = { version = "=0.5.5", default-features = false, optional = true }
 # Bevy's ECS and the three crates that make it a runtime. `default-features =
@@ -214,6 +229,13 @@ path = "src/bin/check_requirements.rs"
 [[bin]]
 name = "catalog"
 path = "src/bin/catalog/main.rs"
+
+# The dependency mortgage report (#722): every edge's replacement, removal
+# trigger and last review, every deferral's trigger, every pin's expiry and
+# every blocked provider's cover, as text or JSON.
+[[bin]]
+name = "ledger"
+path = "src/bin/ledger.rs"
 
 # The documentation-governance reader: every ADR against ISO/IEC/IEEE 42010 and
 # every PRD requirement against ISO/IEC/IEEE 29148.

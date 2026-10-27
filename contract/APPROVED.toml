@@ -672,3 +672,63 @@ approved_by = "maintainer"
 approved_on = "2026-10-26"
 review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/714"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Day-0 revenue slice (2026-10-26, #721).
+#
+# The estate already owns the semantic layer. Day 0 adds only what the revenue
+# slice cannot get from the estate: HTTP routing, HTTP middleware, and the AI
+# security filter. Each edge is an optional default-off storefront feature of
+# `lgwks_deps` with a caller behind it; schema/TLS stay deferred (see
+# contract/DEFERRAL.toml) and TLS terminates at the OS reverse proxy (#728).
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[approved]]
+crate = "axum"
+tier = "boundary"
+version = "^0.8"
+license = "MIT"
+owner = "lgwks_deps"
+capability = "http.server"
+source = "registry"
+uses_default_features = "false"
+features = "http1, tokio, json, tracing"
+allowed_consumers = "lgwks_deps"
+allowed_kinds = "normal"
+reason = "policy-only: no shipped workspace code consumes this edge yet; revenue slice HTTP routing needs Tower-compatible routing the standard library does not provide; hyper and tower arrive transitively and are not authored edges."
+approved_by = "maintainer"
+approved_on = "2026-10-26"
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/721"
+
+[[approved]]
+crate = "tower-http"
+tier = "boundary"
+version = "^0.7"
+license = "MIT"
+owner = "lgwks_deps"
+capability = "http.middleware"
+source = "registry"
+uses_default_features = "false"
+features = "cors, trace, compression-gzip, compression-deflate"
+allowed_consumers = "lgwks_deps"
+allowed_kinds = "normal"
+reason = "policy-only: no shipped workspace code consumes this edge yet; revenue slice HTTP middleware needs cors, trace and gzip/deflate layers absent from the standard library."
+approved_by = "maintainer"
+approved_on = "2026-10-26"
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/721"
+
+[[approved]]
+crate = "llm-guard"
+tier = "boundary"
+version = "^0.2"
+license = "MIT OR Apache-2.0"
+owner = "lgwks_deps"
+capability = "ai.input-guard"
+source = "registry"
+uses_default_features = "false"
+features = "fuzzy"
+allowed_consumers = "lgwks_deps"
+allowed_kinds = "normal"
+reason = "policy-only: no shipped workspace code consumes this edge yet; AI security filtering needs pure-Rust scanners for prompt injection and secret leakage that the estate does not yet detect; pinned to 0.2.0 with the fuzzy scanner only and no model download."
+approved_by = "maintainer"
+approved_on = "2026-10-26"
+review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/721"
