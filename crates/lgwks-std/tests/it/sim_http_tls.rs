@@ -209,7 +209,7 @@ mod sim {
             .spawn(move || serve_one_tls(&listener, body, require_client_auth, &pems, server_key))
             .map_err(|error| format!("the TLS server thread refused to start: {error}"))?;
         let client = Client::new(options)?;
-        let answer = client.get(&format!("https://127.0.0.1:{port}/"));
+        let answer = client.get_with(&format!("https://127.0.0.1:{port}/"), client.options());
         let served = server
             .join()
             .map_err(|payload| {

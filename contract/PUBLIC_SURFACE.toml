@@ -178,8 +178,8 @@
 "crates/lgwks-std/src/hex.rs" = 4
 "crates/lgwks-std/src/http.rs" = 38
 "crates/lgwks-std/src/http/exchange.rs" = 1
-"crates/lgwks-std/src/http/pool.rs" = 18
-"crates/lgwks-std/src/http/stream.rs" = 23
+"crates/lgwks-std/src/http/pool.rs" = 11
+"crates/lgwks-std/src/http/stream.rs" = 27
 "crates/lgwks-std/src/http/tls.rs" = 4
 "crates/lgwks-std/src/id.rs" = 9
 "crates/lgwks-std/src/id/v7.rs" = 1

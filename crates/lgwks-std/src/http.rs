@@ -274,6 +274,14 @@ pub struct Options {
     pub body_policy: BodyPolicy,
     /// Redirect policy. The default follows at most ten hops.
     pub redirect_policy: RedirectPolicy,
+    /// Idle-connection pool a [`Client`] built from these
+    /// options keeps. The free functions build a one-shot agent per call, so
+    /// they read the timeouts and TLS below but never pool on this.
+    pub pool: PoolConfig,
+    /// Private-CA roots and client identity. The default is Mozilla's root
+    /// set with no client certificate, which is today's behavior byte for
+    /// byte; only a deployment behind a private CA or mutual TLS sets this.
+    pub tls: TlsOptions,
 }
 
 impl Default for Options {
@@ -286,6 +294,8 @@ impl Default for Options {
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             body_policy: BodyPolicy::Whole,
             redirect_policy: RedirectPolicy::default(),
+            pool: PoolConfig::default(),
+            tls: TlsOptions::default(),
         }
     }
 }
@@ -382,6 +392,23 @@ impl Options {
     pub fn idempotency_key(self, key: &str) -> Self {
         self.header("Idempotency-Key", key)
     }
+
+    /// Idle-connection pool a [`Client`] built from these
+    /// options keeps. Request-level settings never affect pooling, so a
+    /// per-call value that changes only those still pools.
+    #[must_use]
+    pub fn pool(mut self, pool: PoolConfig) -> Self {
+        self.pool = pool;
+        self
+    }
+
+    /// Private-CA roots and client identity for this exchange or client.
+    /// The default keeps Mozilla's roots with no client certificate.
+    #[must_use]
+    pub fn tls(mut self, tls: TlsOptions) -> Self {
+        self.tls = tls;
+        self
+    }
 }
 
 // ── Response ────────────────────────────────────────────────────────────────
@@ -465,6 +492,56 @@ impl Response {
     #[must_use]
     pub fn text_lossy(&self) -> std::borrow::Cow<'_, str> {
         String::from_utf8_lossy(&self.body)
+    }
+}
+
+// ── Head ────────────────────────────────────────────────────────────────────
+
+/// The part of a completed exchange that does not depend on how the body
+/// arrives: status, headers, and provenance.
+///
+/// [`Response`] carries these fields inline, because its body arrives with
+/// them in one value. [`StreamResponse`] carries them
+/// in this struct, because its body is still on the wire when the head is
+/// read. Both answer the same four questions the same way, so a caller that
+/// only needs the head never learns which shape the body took.
+struct Head {
+    /// HTTP response headers.
+    headers: Vec<(String, String)>,
+    /// Final request target without userinfo, query or fragment.
+    final_target: String,
+    /// Redirect targets, including original and final, with userinfo, query
+    /// and fragment removed.
+    redirect_chain: Vec<String>,
+    /// Exact legal header value bytes with multiplicity, in upstream map order.
+    header_bytes: Vec<(String, Vec<u8>)>,
+}
+
+impl Head {
+    /// Compatibility projection of headers. Values are lossy UTF-8 text and
+    /// order follows the upstream `HeaderMap`, not wire arrival order.
+    fn headers(&self) -> &[(String, String)] {
+        &self.headers
+    }
+
+    /// Iterate header names and exact legal value bytes, preserving repeated
+    /// values. Order is upstream `HeaderMap` iteration order. Each item is a
+    /// header name and its exact legal value bytes, so a repeated header yields
+    /// one item per value.
+    fn header_values(&self) -> impl ExactSizeIterator<Item = (&str, &[u8])> {
+        self.header_bytes
+            .iter()
+            .map(|header| (header.0.as_str(), header.1.as_slice()))
+    }
+
+    /// The sanitized final request target after any followed redirects.
+    fn final_target(&self) -> &str {
+        &self.final_target
+    }
+
+    /// Sanitized redirect history, including original and final targets.
+    fn redirect_chain(&self) -> &[String] {
+        &self.redirect_chain
     }
 }
 
@@ -634,12 +711,26 @@ pub fn post_with(
     exchange(url, Method::Post { content_type, body }, options)
 }
 
-// The exchange itself: URL validation, the per-call agent, the bounded body
-// read, ureq's errors folded into this module's, and the redirect walk.
+// The exchange itself: URL validation, the one-shot agent, the bounded body
+// read, and ureq's errors folded into this module's. The redirect walk that
+// decides which caller headers each hop carries lives in `walk` so the hop
+// loop reads as one decision; `pool` holds the caller-owned pooled client,
+// `stream` the wire-still-open bodies, events and pages, and `tls` the
+// private-CA and identity seam.
 mod exchange;
+mod pool;
+mod stream;
+mod tls;
+mod walk;
 
+use exchange::exchange;
 pub use exchange::validate_url;
-use exchange::{Method, exchange};
+pub use pool::{Client, PoolConfig};
+pub use stream::{
+    Page, Paginate, PaginationLimits, SseEvent, SseStream, StreamResponse, StreamedBody, paginate,
+};
+pub use tls::TlsOptions;
+use walk::Method;
 
 #[cfg(test)]
 // These tests stand up a real loopback server on a real thread and hold it open

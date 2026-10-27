@@ -36,11 +36,15 @@ lgwks_bot = { path = "../crates/lgwks-bot", default-features = false, features =
 # The diagnostics `unlogged-err-return` requires. This rig is its own workspace
 # root, so the facade is a direct edge here rather than reached through the bot.
 # `trace` is default-on upstream, so nothing extra is selected here.
-lgwks_std = { path = "../crates/lgwks-std" }
+lgwks_std = { path = "../crates/lgwks-std", features = ["http"] }
 
 [[bin]]
 name = "lgwks-bench"
 path = "src/main.rs"
+
+[[bin]]
+name = "lgwks-bench-http-pool"
+path = "http-pool/main.rs"
 
 [profile.release]
 opt-level = 3

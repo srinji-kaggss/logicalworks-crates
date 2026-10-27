@@ -1,9 +1,7 @@
 //! `http`'s tests: real loopback servers on named, joined fixture threads.
 
-use super::exchange::{
-    host_is_literal, is_https, map_error, map_read_error, origin_of, read_bounded, reserve_for,
-    resolve_location,
-};
+use super::exchange::{is_https, map_error, map_read_error, read_bounded, reserve_for};
+use super::walk::{host_is_literal, origin_of, resolve_location};
 use super::*;
 
 mod deadlines;
@@ -12,21 +10,15 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 
-const ECHO: &str = "echo-body-123";
+/// The one request-head reader every HTTP fixture server uses, included by
+/// path like the PKI module in `tls.rs`: one server behavior for every
+/// loopback fixture, unit and integration alike. A second copy would be a
+/// second server the harnesses could silently disagree on.
+#[path = "../../../tests/support/loopback.rs"]
+mod loopback;
+use loopback::read_request_head;
 
-/// Read through the end of one HTTP request header block.
-fn read_request_head(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
-    let mut request = [0_u8; 1024];
-    let mut head = Vec::new();
-    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
-        let read = stream.read(&mut request)?;
-        if read == 0 {
-            break;
-        }
-        head.extend_from_slice(&request[..read]);
-    }
-    Ok(head)
-}
+const ECHO: &str = "echo-body-123";
 
 /// Starts one fixture thread and hands back its handle.
 ///
@@ -288,12 +280,8 @@ fn default_option_wrappers_reach_the_same_path() -> Result<(), Box<dyn std::erro
 fn quiet() -> Options {
     Options {
         timeout: Duration::from_secs(5),
-        deadline: None,
         user_agent: "lgwks-std-test".into(),
-        headers: Vec::new(),
-        max_body_bytes: DEFAULT_MAX_BODY_BYTES,
-        body_policy: BodyPolicy::Whole,
-        redirect_policy: RedirectPolicy::default(),
+        ..Default::default()
     }
 }
 
@@ -767,4 +755,6 @@ fn a_see_other_redirect_turns_a_post_into_a_bodiless_get() -> Result<(), Box<dyn
     Ok(())
 }
 
+mod pool;
 mod redirects_and_ceilings;
+mod streaming;
