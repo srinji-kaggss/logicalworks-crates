@@ -71,7 +71,7 @@ pub enum StdioPolicy {
     /// pipe, so a program that reads its input (SQLite's `sqlite3`, a filter,
     /// a prompt) can be driven without a file or a shell redirect. An empty
     /// input closes at once, so the child reads end-of-file without a byte
-    /// first. Past [`MAX_STDIN_BYTES`] the spawn is refused before the fork,
+    /// first. Past one mebibyte of input the spawn is refused before the fork,
     /// the way an unopenable output file is: a program needs a file, not a
     /// pipe, past that.
     ///
