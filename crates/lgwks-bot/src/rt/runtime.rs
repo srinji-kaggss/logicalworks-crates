@@ -432,15 +432,68 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
-/// ADR 0006 R2 falsifier: a process that builds an estate, runs a host and blocks on a future
-/// holds exactly one runtime.
+/// ADR 0006 R2 falsifier: a process that builds an estate, runs a host, ticks a bot and blocks on
+/// a future holds exactly one runtime.
 #[cfg(all(test, feature = "script"))]
 mod one_driver_tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
     use super::{block_on, built_here, driver};
+    use crate::ecs::tests::test_effects;
     use crate::rt::estate::Estate;
+    use crate::rt::task::yield_now;
     use crate::task::task;
+    use crate::{Auth, Bot, BotError, Cap, EffectLifetime, Execute, GrantSet, Observe};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// A source that yields to the driver once, then reports 1.
+    struct YieldsOnce;
+
+    impl Observe for YieldsOnce {
+        type Output = u32;
+
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+
+        async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+            call.0.check(Observe::required_caps(self))?;
+            yield_now().await;
+            Ok(1)
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::one_driver_source"
+        }
+    }
+
+    /// An action that marks the tick it ran in.
+    struct Marks(Rc<Cell<u32>>);
+
+    impl Execute for Marks {
+        type Input = u32;
+        type Output = ();
+
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
+        }
+
+        async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
+            call.0.check(Execute::required_caps(self))?;
+            self.0.set(*call.1);
+            Ok(())
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::one_driver_action"
+        }
+    }
 
     #[test]
     fn one_process_holds_one_driver() -> TestResult {
@@ -460,6 +513,14 @@ mod one_driver_tests {
         let fifth = handle.block_on(async { 5_u64 });
         let drained = supervised.shutdown_blocking()?;
         let after_shutdown = driver()?.block_on(async { 6_u64 });
+        let ran = Rc::new(Cell::new(0));
+        let mut bot = Bot::builder("one-driver")
+            .observe(YieldsOnce)
+            .on(|seen: &u32| *seen == 1, Marks(Rc::clone(&ran)))
+            .with_effects(test_effects()?)
+            .build(&GrantSet::empty())?;
+        let fired = block_on(bot.tick_async())?;
+        assert_eq!((fired, ran.get()), (1, 1), "the bot ticked on the driver");
         assert_eq!(
             (first.output(), second.output(), third.output()),
             (Some(&2), Some(&3), Some(&4)),
@@ -471,7 +532,7 @@ mod one_driver_tests {
         // driver before this test began, and then this one builds none.
         assert!(
             built_here().saturating_sub(before) <= 1,
-            "two estates, a host and two block_on calls built one runtime"
+            "two estates, a host, a bot tick and three block_on calls built one runtime"
         );
         Ok(())
     }
