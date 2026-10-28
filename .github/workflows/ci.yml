@@ -105,6 +105,12 @@ env:
   # job has. This restores the declared setting; it changes how much is
   # recompiled, not what is built.
   CARGO_INCREMENTAL: "1"
+  # One warning fails the run, in every job and every cargo command, not only
+  # where a clippy leg passes `-D warnings` (Director 2026-10-28: "YOU WILL
+  # EDIT CI.YML TO FAIL ON A SINGLE CLIPPY WARNING"). Cargo's `build.warnings`
+  # denies the warnings of the workspace's own packages, rustc's and clippy's
+  # alike, without touching `RUSTFLAGS` and so without a second cache key.
+  CARGO_BUILD_WARNINGS: deny
 
 # `LWC_CHURN_SLOTS` is the machine-wide count of test processes the nextest
 # wrapper `churn-slot` lets run at once (`.config/nextest.toml`); unset it is 6.
