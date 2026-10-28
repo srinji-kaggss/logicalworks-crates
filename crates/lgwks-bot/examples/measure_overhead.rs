@@ -72,7 +72,8 @@ lgwks_bot::script! {
 enum Unit {
     /// Microseconds: a whole call through a public entry point.
     Micros,
-    /// Nanoseconds: one script line, far below a microsecond.
+    /// Nanoseconds: one script line or one synchronous door, far below a
+    /// microsecond.
     Nanos,
 }
 
@@ -149,38 +150,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for input in 0..run_count {
         let started = Instant::now();
         let answered = lgwks_bot::block_on(async move { input });
-        block_on_samples.push(started.elapsed().as_micros());
+        block_on_samples.push(started.elapsed().as_nanos());
         assert_eq!(
             answered, input,
             "every measured block_on returned its input"
         );
     }
-    report("block_on", Unit::Micros, block_on_samples)?;
+    report("block_on", Unit::Nanos, block_on_samples)?;
     let mut host_block_samples = Vec::with_capacity(runs);
     for input in 0..run_count {
         let started = Instant::now();
         let run = host.block_on(&ready, input)?;
-        host_block_samples.push(started.elapsed().as_micros());
+        host_block_samples.push(started.elapsed().as_nanos());
         assert_eq!(
             run.output().copied(),
             Some(input),
             "every measured run returned its input"
         );
     }
-    report("host_block_on", Unit::Micros, host_block_samples)?;
+    report("host_block_on", Unit::Nanos, host_block_samples)?;
     let estate = Estate::in_process("analysis")?;
     let mut estate_samples = Vec::with_capacity(runs);
     for input in 0..run_count {
         let started = Instant::now();
         let run = estate.run_blocking(&ready, input)?;
-        estate_samples.push(started.elapsed().as_micros());
+        estate_samples.push(started.elapsed().as_nanos());
         assert_eq!(
             run.output().copied(),
             Some(input),
             "every measured run returned its input"
         );
     }
-    report("estate_run_blocking", Unit::Micros, estate_samples)?;
+    report("estate_run_blocking", Unit::Nanos, estate_samples)?;
 
     // One script line: a run of `lines` on a fresh root, per line it entered.
     let tenant = Tenant::new("overhead")?;
