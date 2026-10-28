@@ -18,7 +18,7 @@ use std::cell::Cell;
 use std::future::Future;
 use std::io;
 use std::num::NonZeroUsize;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 /// Maximum number of native worker threads accepted by [`Builder`].
@@ -261,32 +261,39 @@ pub(crate) fn built_here() -> usize {
     BUILT.with(Cell::get)
 }
 
-/// The process driver, built on first use by [`driver`] and never dropped.
-static DRIVER: Mutex<Option<Runtime>> = Mutex::new(None);
+/// The process driver, set once by [`driver`] and never dropped.
+static DRIVER: OnceLock<Runtime> = OnceLock::new();
+
+/// Serialises the driver's first build, so two first callers build one runtime.
+static BUILDING: Mutex<()> = Mutex::new(());
 
 /// The handle of the one process driver, building it on first use.
 ///
 /// Built with [`Builder`]'s defaults: the discovered worker count, named
-/// `lgwks-bot`. The lock is held only while the slot is read or filled, never
-/// while work runs, and a poisoned lock is recovered because a [`Runtime`] has
-/// no half-built state a panic could leave behind.
+/// `lgwks-bot`. Once built, a call is one lock-free read, so every synchronous
+/// door on every thread reads the driver without contending; only the first
+/// build takes [`BUILDING`], and reads the slot again under it. A poisoned lock
+/// is recovered because it guards no state of its own. `OnceLock` rather than
+/// `LazyLock` because the build can fail and must say why.
 ///
 /// # Errors
 ///
 /// The OS refusing the driver's worker threads or I/O resources. Nothing is
 /// stored then, so the next call tries again.
 pub(crate) fn driver() -> io::Result<Handle> {
-    let mut slot = match DRIVER.lock() {
-        Ok(slot) => slot,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    if let Some(runtime) = slot.as_ref() {
+    if let Some(runtime) = DRIVER.get() {
         return Ok(runtime.handle());
     }
-    let runtime = Builder::new().build()?;
-    let handle = runtime.handle();
-    *slot = Some(runtime);
-    Ok(handle)
+    let _building = match BUILDING.lock() {
+        Ok(building) => building,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(runtime) = DRIVER.get() {
+        return Ok(runtime.handle());
+    }
+    let built = Builder::new().build()?;
+    // Under `BUILDING` no other caller sets the slot, so `built` is the value stored.
+    Ok(DRIVER.get_or_init(|| built).handle())
 }
 
 /// The native worker count discovered from the OS, or `None` when the platform
