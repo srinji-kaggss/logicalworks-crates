@@ -86,6 +86,11 @@ impl<'run> Cargo<'run> {
     ) -> Self {
         let mut env = inherited_env();
         forget_launched_crate(&mut env);
+        // A trial is graded on its own code, not on the host's warning policy:
+        // under CI's `CARGO_BUILD_WARNINGS=deny` every trial read
+        // `compiled=false`, references that build clean included. Cargo's default
+        // is pinned here, and the environment outranks any config file.
+        env.insert("CARGO_BUILD_WARNINGS".to_owned(), "warn".to_owned());
         env.insert(
             "CARGO_TARGET_DIR".to_owned(),
             work.join("target").display().to_string(),
