@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lgwks_bot::dist_lease::QueueError;
-use lgwks_bot::rt::runtime::Runtime;
+use lgwks_bot::rt::runtime::Handle;
 use lgwks_bot::script::{
     Allowance, Compensations, Decision, FlowError, GraphNode, GraphReport, Justify, JustifyCtx,
     NodeOutcome, Overflow, PumpReport, Rule, Scope, StreamGate, Tenant, TypedAction, TypedSource,
@@ -235,7 +235,7 @@ fn refuse<T>(section: Section, check: &'static str) -> Result<T, VocabularyError
 ///
 /// The first failed check with its section, or the runtime error the run
 /// returned.
-pub(crate) fn run(driver: &Runtime) -> Result<(), VocabularyError> {
+pub(crate) fn run(driver: &Handle) -> Result<(), VocabularyError> {
     let scope = Scope::root(Tenant::new("vocab")?);
 
     // Justification: one rule per verdict, each deciding on its own.
