@@ -48,18 +48,28 @@ fn block_lines(block: &Block, out: &mut Vec<Passthrough>) {
                     block_lines(branch.body(), out);
                 }
             }
+            Statement::Compensate(ref undo) => block_lines(undo.undo(), out),
             Statement::Run(_) | Statement::GiveBack(_) | Statement::Fail { .. } => {}
         }
     }
 }
 
-/// The passthrough lines inside a block word's body.
+/// The passthrough lines inside a block word's body. A `whenever`'s batch
+/// expression is the word's own, so only its body is read.
 fn construct_lines(construct: &Construct, out: &mut Vec<Passthrough>) {
     let body = match *construct {
         Construct::Each(ref each) => each.body(),
         Construct::Within(ref within) => within.body(),
         Construct::Retry(ref again) => again.body(),
-        Construct::Step(ref step) => step.body(),
+        Construct::Step(ref step) | Construct::Saga(ref step) => step.body(),
+        Construct::Whenever(ref feed) => feed.body(),
+        Construct::Justify(ref block) => block.governed(),
+        Construct::Graph(ref declared) => {
+            for node in declared.nodes() {
+                block_lines(node.body(), out);
+            }
+            return;
+        }
     };
     block_lines(body, out);
 }

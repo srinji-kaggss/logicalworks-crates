@@ -15,7 +15,7 @@
 //! | Family | Property it pins |
 //! |---|---|
 //! | `justification_sequence_replays` | the same seed reaches the same allow/slow/park/block sequence, and the rules are consulted in order |
-//! | `graph_schedule_respects_needs_capacity_and_bound` | needs respected, each node once, bounded concurrency, failures blocking only downstream, and the schedule inside the Graham bound |
+//! | `graph_schedule_respects_needs_capacity_and_bound` | needs respected, each node once, bounded concurrency, failures blocking only downstream, the greedy critical-path schedule round for round, and its makespan inside the Graham bound |
 //! | `compensation_replays_in_reverse` | a seeded failing step undoes exactly the finished steps in reverse order, and a seeded success undoes nothing |
 //! | `stream_gate_bounds_the_feed` | every event is handled in order, bursts past the cap follow the drawn policy, and the report counts what the policy shed |
 //!
@@ -38,7 +38,7 @@ use lgwks_bot::script::{
 
 use crate::band_family;
 use crate::sim::{self, Band};
-use crate::sim_script::{drive, locked, tenant_scope};
+use crate::sim_script::{Turns, drive, locked, tenant_scope};
 
 /// A test's result: an error fails it with the error's text.
 type TestResult = Result<(), Box<dyn Error>>;
@@ -181,14 +181,18 @@ fn lane_graph(
     peak: &Arc<AtomicUsize>,
     started: &Arc<AtomicUsize>,
 ) -> Result<LaneGraph, Box<dyn Error>> {
-    const NAMES: [&str; 4] = ["fetch-a", "fetch-b", "merge", "publish"];
-    const LANES: [(&str, &[&str]); 4] = [
+    // `docs` needs only `fetch-a` and `lint` needs nothing, so a slow
+    // `fetch-b` must never hold either back: the schedule is greedy, not waved.
+    const NAMES: [&str; 6] = ["fetch-a", "fetch-b", "merge", "publish", "lint", "docs"];
+    const LANES: [(&str, &[&str]); 6] = [
         ("fetch-a", &[]),
         ("fetch-b", &[]),
         ("merge", &["fetch-a", "fetch-b"]),
         ("publish", &["merge"]),
+        ("lint", &[]),
+        ("docs", &["fetch-a"]),
     ];
-    let failing = usize::try_from(sim.rng().below(5))?;
+    let failing = usize::try_from(sim.rng().below(7))?;
     let failing = NAMES.get(failing).copied();
     let slots = usize::try_from(sim.rng().between(1, 3))?;
     let mut total: u64 = 0;
@@ -214,6 +218,11 @@ fn lane_graph(
                     let now = live.fetch_add(1, Ordering::Relaxed).saturating_add(1);
                     peak.fetch_max(now, Ordering::Relaxed);
                     started.fetch_add(1, Ordering::Relaxed);
+                    // The node holds its slot for exactly `work` rounds.
+                    Turns(u32::try_from(work.saturating_sub(1)).map_err(|error| {
+                        FlowError::failed(format!("a lane's work fits a u32: {error}"))
+                    })?)
+                    .await;
                     let result = if fails {
                         Err(FlowError::failed("a seeded lane failed"))
                     } else {
@@ -386,32 +395,128 @@ fn graph_schedule_respects_needs_capacity_and_bound(band: Band) -> TestResult {
             observed <= slots,
             "at most {slots} nodes ran at once, saw {observed}"
         );
-        // The Graham bound on the executed schedule: the wave costs fit in
-        // ceil(total / slots) + the critical path.
+        // Greedy by critical path: the runtime started exactly what the hand
+        // model starts, round by round, and the model's makespan sits inside
+        // Graham's bound, ceil(total / slots) + the critical path. A lane of
+        // work `w` waits `w - 1` turns, so it holds its slot `w` rounds.
+        let (expected, makespan) = greedy_model(&edges, &works, slots, failing)?;
+        assert_eq!(
+            report.waves(),
+            expected.as_slice(),
+            "every free slot took the tallest ready node the moment it was ready"
+        );
         let critical = critical_path(&edges, &works);
-        let mut wave_cost: u64 = 0;
-        for wave in report.waves() {
-            let mut work: u64 = 0;
-            for name in wave {
-                for entry in &works {
-                    if entry.0 == *name {
-                        work = work.saturating_add(entry.1);
-                    }
-                }
-            }
-            wave_cost = wave_cost.saturating_add(ceil_div(work, u64::try_from(slots)?)?);
-        }
         let bound = ceil_div(total, u64::try_from(slots)?)?.saturating_add(critical);
         assert!(
-            wave_cost <= bound,
-            "the schedule costs {wave_cost} wave units against a bound of {bound}"
+            makespan <= bound,
+            "the schedule takes {makespan} rounds against a bound of {bound}"
         );
         sim.record(&format!(
-            "slots={slots} failing={failing:?} waves={:?} blocked={blocked:?} peak={observed} cost={wave_cost}/{bound}",
+            "slots={slots} failing={failing:?} starts={:?} blocked={blocked:?} peak={observed} rounds={makespan}/{bound}",
             report.waves()
         ));
         Ok(())
     })
+}
+
+/// The nodes started at each round that started any, in start order.
+type Starts = Vec<Vec<&'static str>>;
+
+/// The greedy schedule kept by hand: at each round the free slots take the
+/// ready nodes with the heaviest chain of work below them, declaration order
+/// breaking ties; a node of work `w` holds its slot `w` rounds; a failed
+/// node's downstream never becomes ready. Returns the nodes started at each
+/// round that started any, and the round the last node finished.
+fn greedy_model(
+    edges: &[(&'static str, Vec<&'static str>)],
+    works: &[(&'static str, u64)],
+    slots: usize,
+    failing: Option<&'static str>,
+) -> Result<(Starts, u64), Box<dyn Error>> {
+    let work_of = |name: &str| -> Result<u64, Box<dyn Error>> {
+        works
+            .iter()
+            .find(|entry| entry.0 == name)
+            .map(|entry| entry.1)
+            .ok_or_else(|| format!("{name} has no work").into())
+    };
+    let mut height: Vec<u64> = Vec::with_capacity(edges.len());
+    for edge in edges {
+        height.push(work_of(edge.0)?);
+    }
+    // Heights settle from the leaves up; the graph has no cycle, so this ends.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (at, edge) in edges.iter().enumerate() {
+            let below = edges
+                .iter()
+                .enumerate()
+                .filter(|other| other.1.1.contains(&edge.0))
+                .filter_map(|other| height.get(other.0))
+                .fold(0_u64, |heaviest, chain| heaviest.max(*chain));
+            let tall = work_of(edge.0)?.saturating_add(below);
+            if let Some(held) = height.get_mut(at)
+                && tall > *held
+            {
+                *held = tall;
+                changed = true;
+            }
+        }
+    }
+    let mut succeeded: Vec<&'static str> = Vec::new();
+    let mut closed: Vec<&'static str> = Vec::new();
+    let mut running: Vec<(&'static str, u64)> = Vec::new();
+    let mut starts: Vec<Vec<&'static str>> = Vec::new();
+    let mut now: u64 = 0;
+    loop {
+        let finished: Vec<&'static str> = running
+            .iter()
+            .filter(|entry| entry.1 == now)
+            .map(|entry| entry.0)
+            .collect();
+        running.retain(|entry| entry.1 != now);
+        for name in finished {
+            if Some(name) != failing {
+                succeeded.push(name);
+                continue;
+            }
+            // The failure closes itself and everything downstream of it.
+            let mut open = vec![name];
+            closed.push(name);
+            while let Some(next) = open.pop() {
+                for edge in edges {
+                    if edge.1.contains(&next) && !closed.contains(&edge.0) {
+                        closed.push(edge.0);
+                        open.push(edge.0);
+                    }
+                }
+            }
+        }
+        let mut ready: Vec<(u64, usize, &'static str)> = Vec::new();
+        for (at, edge) in edges.iter().enumerate() {
+            let begun = closed.contains(&edge.0)
+                || succeeded.contains(&edge.0)
+                || running.iter().any(|entry| entry.0 == edge.0);
+            if !begun && edge.1.iter().all(|need| succeeded.contains(need)) {
+                let tall = height.get(at).copied().ok_or("a node has no height")?;
+                ready.push((tall, at, edge.0));
+            }
+        }
+        ready.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+        let mut batch = Vec::new();
+        for entry in ready.into_iter().take(slots.saturating_sub(running.len())) {
+            running.push((entry.2, now.saturating_add(work_of(entry.2)?)));
+            batch.push(entry.2);
+        }
+        if !batch.is_empty() {
+            starts.push(batch);
+        }
+        let Some(next) = running.iter().map(|entry| entry.1).min() else {
+            return Ok((starts, now));
+        };
+        now = next;
+    }
 }
 
 /// Compensation on the real run path: a seeded failing step undoes exactly
@@ -453,7 +558,7 @@ fn compensation_replays_in_reverse(band: Band) -> TestResult {
                             }
                             Ok(())
                         })
-                    });
+                    })?;
                 }
                 Ok("ticket")
             }

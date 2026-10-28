@@ -26,9 +26,11 @@ use super::tree::{Block, Construct, Flow, FlowShape, Script, Statement, StepShap
 use super::{Refusal, Result};
 
 mod blocks;
+mod vocab;
 mod words;
 
 use blocks::{each, for_loop, if_chain, retry, split_let, step, together, within};
+use vocab::{compensate, graph, justify, saga, whenever};
 use words::{expect_words, rewrite, run_only, shape, text_of};
 
 /// Ordinals for sibling labels within one scope.
@@ -59,6 +61,8 @@ struct Place {
     nested: bool,
     /// Whether the block's last expression is its value.
     wants_value: bool,
+    /// Whether this is a `saga`'s own body, the one place `compensate` stands.
+    saga: bool,
 }
 
 /// Read a whole script: every flow, with the attributes written above it.
@@ -151,6 +155,7 @@ fn flow(node: Node, attributes: Vec<TokenTree>) -> Result<Flow> {
     let place = Place {
         nested: false,
         wants_value: output.is_some(),
+        saga: false,
     };
     let (body, steps) = block(&children, &mut labels, place)?;
     if output.is_some() && body.tail().is_none() && !body.diverges() {
@@ -217,6 +222,11 @@ fn block(nodes: &[Node], labels: &mut Labels, place: Place) -> Result<(Block, Ve
             statements.push(statement);
             shapes.extend(chain_shapes);
             chain.len().saturating_add(1)
+        } else if kind == Some(Kind::Compensate) {
+            let (statement, shape) = compensate(node, place, &statements)?;
+            statements.push(statement);
+            shapes.push(shape);
+            1
         } else {
             let (statement, shape) = statement(node, labels, place, &mut shapes)?;
             statements.push(statement);
@@ -271,7 +281,8 @@ fn statement(
     }
 }
 
-/// Read a block that yields a value: `each`, `within`, `retry`, `step`.
+/// Read a block that yields a value: `each`, `within`, `retry`, `step`,
+/// `graph`, `saga`, `whenever`, `justify`.
 fn construct(
     line: &Line,
     children: &[Node],
@@ -282,6 +293,18 @@ fn construct(
         Some(Kind::Within) => within(line, children, labels),
         Some(Kind::Retry) => retry(line, children, labels),
         Some(Kind::Step) => step(line, children, labels),
+        Some(Kind::Graph) => graph(line, children, labels),
+        Some(Kind::Saga) => saga(line, children, labels),
+        Some(Kind::Whenever) => whenever(line, children, labels),
+        Some(Kind::Justify) => justify(line, children, labels),
+        Some(Kind::Node) => {
+            let refusal = Err(Refusal::new(
+                line.span,
+                "a `node` is one node of a graph: write it under a `graph:` line",
+            ));
+            tracing::debug!(error = ?refusal.as_ref().err(), "construct: returning an error to the caller");
+            refusal
+        }
         _ => {
             let refusal = Err(Refusal::new(
                 line.span,

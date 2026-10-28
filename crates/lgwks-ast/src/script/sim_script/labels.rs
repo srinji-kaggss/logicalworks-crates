@@ -50,6 +50,10 @@ fn block_labels(block: &Block, out: &mut Vec<String>) {
                     block_labels(branch.body(), out);
                 }
             }
+            Statement::Compensate(ref undo) => {
+                out.push(format!("undo:{}", undo.undoes()));
+                block_labels(undo.undo(), out);
+            }
         }
     }
 }
@@ -70,9 +74,25 @@ fn construct_labels(construct: &Construct, out: &mut Vec<String>) {
             out.push(again.label().to_owned());
             block_labels(again.body(), out);
         }
-        Construct::Step(ref step) => {
+        Construct::Step(ref step) | Construct::Saga(ref step) => {
             out.push(step.label().to_owned());
             block_labels(step.body(), out);
+        }
+        Construct::Graph(ref declared) => {
+            out.push(declared.label().to_owned());
+            for node in declared.nodes() {
+                out.push(node.name().to_owned());
+                block_labels(node.body(), out);
+            }
+        }
+        Construct::Whenever(ref feed) => {
+            out.push(feed.label().to_owned());
+            code_labels(feed.batches(), out);
+            block_labels(feed.body(), out);
+        }
+        Construct::Justify(ref block) => {
+            out.push(block.label().to_owned());
+            block_labels(block.governed(), out);
         }
     }
 }

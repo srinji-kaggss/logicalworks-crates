@@ -129,15 +129,7 @@ where
     };
     let width = declared.get().min(MAX_IN_FLIGHT);
     let lease = limit.is_none().then(|| HostLease::take(host_pool()));
-    let wakes = Arc::new(Wakes::new(width));
-    let wakers: Vec<Waker> = (0..width)
-        .map(|position| {
-            Waker::from(Arc::new(SlotWaker {
-                position,
-                wakes: Arc::clone(&wakes),
-            }))
-        })
-        .collect();
+    let (wakes, wakers) = slot_wakers(width);
     let mut fan = Fan {
         slots: (0..width).map(|_| None).collect(),
         free: (0..width).rev().collect(),
@@ -324,8 +316,24 @@ impl<T, Fut: Future<Output = Result<T, FlowError>>> Fan<T, Fut> {
     }
 }
 
+/// The wake queue for `width` slots and one waker per slot, each queueing its
+/// own slot and waking the driving task. Shared by [`each`] and the `graph`
+/// scheduler, so both re-poll only what woke.
+pub(super) fn slot_wakers(width: usize) -> (Arc<Wakes>, Vec<Waker>) {
+    let wakes = Arc::new(Wakes::new(width));
+    let wakers = (0..width)
+        .map(|position| {
+            Waker::from(Arc::new(SlotWaker {
+                position,
+                wakes: Arc::clone(&wakes),
+            }))
+        })
+        .collect();
+    (wakes, wakers)
+}
+
 /// Which slots have been woken, and the waker of the task driving them.
-struct Wakes {
+pub(super) struct Wakes {
     /// Guarded together so a wake cannot land between reading the queue and
     /// registering the parent.
     state: Mutex<WakeState>,
@@ -361,7 +369,7 @@ impl Wakes {
     }
 
     /// Record the waker of the task driving the fan-out.
-    fn set_parent(&self, waker: &Waker) {
+    pub(super) fn set_parent(&self, waker: &Waker) {
         let mut state = self.lock();
         let stale = state
             .parent
@@ -374,7 +382,7 @@ impl Wakes {
 
     /// Queue `position` for polling. Used when a body is first admitted, where
     /// the driving task is already running and needs no wake.
-    fn mark(&self, position: usize) {
+    pub(super) fn mark(&self, position: usize) {
         enqueue(&mut self.lock(), position);
     }
 
@@ -387,7 +395,7 @@ impl Wakes {
 
     /// Everything queued since the last call, with the flags cleared first so
     /// a wake during the coming polls queues its slot again.
-    fn take_ready(&self) -> VecDeque<usize> {
+    pub(super) fn take_ready(&self) -> VecDeque<usize> {
         let mut state = self.lock();
         let ready = std::mem::take(&mut state.ready);
         for &position in &ready {

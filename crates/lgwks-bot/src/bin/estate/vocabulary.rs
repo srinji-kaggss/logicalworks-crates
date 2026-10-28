@@ -1,8 +1,9 @@
 //! The script vocabulary on the shipped artifact: justification, graphs,
 //! compensation, streams, typed domains, bounds and deadlines.
 //!
-//! Each section names the runtime its words desugar into and checks what the
-//! run reports: a WAF that stops a run with its reason code, a needs-ordered
+//! `graph`, `saga`, `whenever` and `justify` run as `script!` flows, the one
+//! way in; each section then checks the runtime items those words expand to
+//! and what the run reports: a WAF that stops a run with its reason code, a needs-ordered
 //! graph whose failure blocks only downstream, compensations in reverse order,
 //! a bounded feed, typed calls mapped into the domain error, and the bounds
 //! and deadlines the words check at. A mismatch fails the smoke: the binary's
@@ -10,7 +11,7 @@
 //! interface; every new `script` item the crate exposes is named here, which
 //! is what makes this module the surface guard's caller for them.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lgwks_bot::dist_lease::QueueError;
@@ -18,11 +19,69 @@ use lgwks_bot::rt::runtime::Runtime;
 use lgwks_bot::script::{
     Allowance, Compensations, Decision, FlowError, GraphNode, GraphReport, Justify, JustifyCtx,
     NodeOutcome, Overflow, PumpReport, Rule, Scope, StreamGate, Tenant, TypedAction, TypedSource,
-    Verdict, act_typed, compensated, graph, map_domain, observe_typed, pump,
+    Verdict, act_typed, map_domain, observe_typed,
 };
-use lgwks_bot::script::{MAX_GRAPH_NODES, at_most, attempts, retry, within, within_on};
+use lgwks_bot::script::{
+    MAX_COMPENSATIONS, MAX_GRAPH_NODES, at_most, attempts, retry, within, within_on,
+};
 
 use super::say;
+
+/// Keep `step` in `log`; a poisoned log keeps what it had.
+fn note(log: &Mutex<Vec<&'static str>>, step: &'static str) {
+    if let Ok(mut held) = log.lock() {
+        held.push(step);
+    }
+}
+
+/// The issue that fails every booking the smoke makes, logged first.
+fn refused_issue() -> Result<u64, FlowError> {
+    let refusal = Err(FlowError::failed("vocab-issue"));
+    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "vocabulary: the issue refuses");
+    refusal
+}
+
+/// The feed's next batch, newest last; `None` once it is drained.
+fn next_batch(feed: &Mutex<Vec<Vec<u32>>>) -> Option<Vec<u32>> {
+    feed.lock().ok()?.pop()
+}
+
+lgwks_bot::script! {
+    flow vocab_lanes(limit: usize) -> GraphReport<u64>:
+        let report = graph, at most (limit) at once:
+            node fetch_a:
+                1_u64
+            node fetch_b:
+                2_u64
+            node merge needs fetch_a, fetch_b:
+                3_u64
+        give back report
+
+    flow vocab_booking(undone: &Mutex<Vec<&'static str>>) -> u64:
+        let ticket = saga booking:
+            step reserve:
+                1_u64
+            compensate reserve:
+                note(undone, "reserve")
+            step charge:
+                2_u64
+            compensate charge:
+                note(undone, "charge")
+            step issue:
+                refused_issue()?
+        give back ticket
+
+    flow vocab_prices(feed: &Mutex<Vec<Vec<u32>>>) -> PumpReport:
+        let report = whenever price in next_batch(feed), buffering 4, drop oldest:
+            price
+        give back report
+
+    flow vocab_governed(rules: &Justify) -> u64:
+        let code = justify with (rules):
+            step call:
+                7_u64
+        give back code
+}
 
 /// The vocabulary's own error: what a typed call maps a refusal into.
 #[derive(Debug, PartialEq)]
@@ -316,33 +375,18 @@ pub(crate) fn run(driver: &Runtime) -> Result<(), VocabularyError> {
     }
     say("bounds: the fan-out bound, retry budget and deadlines hold")?;
 
-    // A needs-ordered graph: fetch twice, merge, with the bound above.
+    // A needs-ordered graph, written as `graph:`: fetch twice, merge.
     if MAX_GRAPH_NODES != 4_096 {
         return refuse(
             Section::Graph,
             "the graph admits more lanes than any lane graph needs",
         );
     }
-    let nodes = vec![
-        GraphNode::new("fetch-a", &[], |_scope| {
-            Box::pin(async move { Ok::<u64, FlowError>(1) })
-        })
-        .with_work(2),
-        GraphNode::new("fetch-b", &[], |_scope| {
-            Box::pin(async move { Ok::<u64, FlowError>(2) })
-        })
-        .with_work(1),
-        GraphNode::new("merge", &["fetch-a", "fetch-b"], |_scope| {
-            Box::pin(async move { Ok::<u64, FlowError>(3) })
-        })
-        .with_work(1),
-    ];
-    let report: GraphReport<u64> =
-        driver.block_on(graph(&scope, "vocab-lanes", bound.get(), nodes))?;
+    let report: GraphReport<u64> = driver.block_on(vocab_lanes(&scope, bound.get()))?;
     if !report.is_ok() {
         return refuse(Section::Graph, "every lane ran to a value");
     }
-    if report.succeeded() != vec!["fetch-a", "fetch-b", "merge"] {
+    if report.succeeded() != vec!["fetch_a", "fetch_b", "merge"] {
         return refuse(Section::Graph, "every lane ran in needs order");
     }
     if !report.failed().is_empty() || !report.blocked().is_empty() {
@@ -352,68 +396,57 @@ pub(crate) fn run(driver: &Runtime) -> Result<(), VocabularyError> {
         return refuse(Section::Graph, "the wave count is the schedule length");
     }
     match report.outcome("merge") {
-        Some(outcome) => {
-            if !matches!(outcome, NodeOutcome::Ran(Ok(_))) {
-                return refuse(Section::Graph, "merge ran to a value");
-            }
-        }
-        None => {
-            return refuse(Section::Graph, "merge has an outcome");
+        Some(&NodeOutcome::Ran(Ok(3))) => {}
+        _ => {
+            return refuse(Section::Graph, "merge ran to its value");
         }
     }
-    let node = GraphNode::new("probe", &["fetch-a"], |_scope| {
+    let node = GraphNode::new("probe", &["fetch_a"], |_scope| {
         Box::pin(async move { Ok::<u64, FlowError>(0) })
-    });
-    if node.name() != "probe" || node.needs() != ["fetch-a"] {
+    })
+    .with_work(2);
+    if node.name() != "probe" || node.needs() != ["fetch_a"] {
         return refuse(Section::Graph, "a node carries its name and its needs");
     }
     say(&format!("graph: lanes ran {:?}", report.succeeded()))?;
 
-    // Compensation: a booking that fails at its issue undoes charge and reserve.
+    // Compensation, written as `saga`: a booking that fails at its issue
+    // undoes charge and reserve, newest first, once each.
     let fresh: Compensations<'_> = Compensations::new();
     say(&format!(
         "compensation: a fresh registrar holds {}",
         fresh.len()
     ))?;
-    if !fresh.is_empty() {
+    if !fresh.is_empty() || MAX_COMPENSATIONS != 4_096 {
         return refuse(Section::Compensation, "a fresh registrar holds nothing");
     }
-    let booking = driver.block_on(compensated(
-        &scope,
-        "vocab-booking",
-        |_scope, stack| async move {
-            stack.add("vocab-reserve", |undo| {
-                Box::pin(async move {
-                    let _ = undo;
-                    Ok::<(), FlowError>(())
-                })
-            });
-            stack.add("vocab-charge", |undo| {
-                Box::pin(async move {
-                    let _ = undo;
-                    Ok::<(), FlowError>(())
-                })
-            });
-            if stack.len() != 2 || stack.is_empty() {
-                Err(FlowError::failed("the registrar lost its undos"))
-            } else {
-                Err::<(), FlowError>(FlowError::failed("vocab-issue"))
-            }
-        },
-    ));
-    match booking {
+    let undone: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    match driver.block_on(vocab_booking(&scope, &undone)) {
         Err(error) => {
             if !error.to_string().contains("vocab-issue") {
-                return refuse(Section::Compensation, "the caller gets the body's failure");
+                return refuse(Section::Compensation, "the caller gets the step's failure");
             }
             say(&format!("compensation: issuing failed the run as {error}"))?;
         }
-        Ok(()) => {
+        Ok(ticket) => {
+            say(&format!("compensation: issued {ticket}"))?;
             return refuse(Section::Compensation, "issuing must fail this run");
         }
     }
+    let order = match undone.lock() {
+        Ok(held) => held.clone(),
+        Err(_) => return refuse(Section::Compensation, "the undo log is readable"),
+    };
+    if order != ["charge", "reserve"] {
+        return refuse(
+            Section::Compensation,
+            "the undos ran newest first, once each",
+        );
+    }
+    say(&format!("compensation: undid {order:?}"))?;
 
-    // A bounded feed: every event through a gate of four, nothing shed.
+    // A bounded feed, written as `whenever`: every event through a buffer of
+    // four, nothing shed.
     let mut gate: StreamGate<u32> = StreamGate::new(4, Overflow::DropOldest)?;
     match StreamGate::<u32>::new(0, Overflow::Refuse) {
         Err(error) => {
@@ -422,13 +455,6 @@ pub(crate) fn run(driver: &Runtime) -> Result<(), VocabularyError> {
         Ok(_) => {
             return refuse(Section::Stream, "a zero cap must not build");
         }
-    }
-    let policies = [Overflow::DropOldest, Overflow::DropNewest, Overflow::Refuse];
-    if policies.len() != 3 {
-        return refuse(
-            Section::Stream,
-            "the gate names its three overflow policies",
-        );
     }
     say(&format!(
         "stream: a new gate holds {} of {}",
@@ -441,30 +467,17 @@ pub(crate) fn run(driver: &Runtime) -> Result<(), VocabularyError> {
             "a new gate holds nothing under a bound of four",
         );
     }
-    if gate.push(1_u32).is_err() {
-        return refuse(Section::Stream, "the first push fits");
-    }
-    if gate.len() != 1 || gate.pop() != Some(1_u32) {
-        return refuse(Section::Stream, "a retained event pops back");
-    }
     if gate.dropped() != 0 || gate.refused() != 0 {
         return refuse(
             Section::Stream,
             "an unpressured gate sheds and refuses nothing",
         );
     }
-    let pending: std::cell::RefCell<Vec<Option<Vec<u32>>>> =
-        std::cell::RefCell::new(vec![None, Some(vec![4, 5]), Some(vec![1, 2, 3])]);
-    let report: PumpReport = driver.block_on(pump(
-        &scope,
-        "vocab-prices",
-        &mut gate,
-        || {
-            let batch = pending.borrow_mut().pop().flatten();
-            async move { batch }
-        },
-        |_, _| async move { Ok::<(), FlowError>(()) },
-    ))?;
+    if gate.push(1_u32).is_err() || gate.pop() != Some(1_u32) {
+        return refuse(Section::Stream, "a retained event pops back");
+    }
+    let feed: Mutex<Vec<Vec<u32>>> = Mutex::new(vec![vec![4, 5], vec![1, 2, 3]]);
+    let report: PumpReport = driver.block_on(vocab_prices(&scope, &feed))?;
     if report.handled != 5 || report.dropped != 0 || report.refused != 0 {
         return refuse(
             Section::Stream,
@@ -475,6 +488,24 @@ pub(crate) fn run(driver: &Runtime) -> Result<(), VocabularyError> {
         "stream: handled {} dropped {} refused {}",
         report.handled, report.dropped, report.refused
     ))?;
+
+    // Justification, written as `justify with (rules):`: allowed, the step
+    // runs; blocked, it stops with the rule's name before its body.
+    let allowed = driver.block_on(vocab_governed(&scope, &Justify::empty()))?;
+    if allowed != 7 {
+        return refuse(Section::Justify, "an allowed block gives back its value");
+    }
+    let closed = Justify::new(vec![Rule::new("vocab-closed", |_| Verdict::Block {
+        reason: String::from("vocab-closed-hours"),
+    })]);
+    match driver.block_on(vocab_governed(&scope, &closed)) {
+        Err(FlowError::Justified { rule, .. }) if rule == "vocab-closed" => {
+            say(&format!("justify: the block stopped at {rule}"))?;
+        }
+        _ => {
+            return refuse(Section::Justify, "a blocked block stops naming its rule");
+        }
+    }
 
     // Typed domains: no registry installed, so both calls fail typed, and the
     // boundary maps success and failure without touching either.

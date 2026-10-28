@@ -423,7 +423,7 @@ impl Script {
             let choice = if depth >= MAX_DEPTH {
                 self.draw.index(2)?
             } else {
-                self.draw.index(8)?
+                self.draw.index(9)?
             };
             let written = match choice {
                 0 => self.plain(depth),
@@ -432,7 +432,8 @@ impl Script {
                 4 => self.nested(depth, "step part", Kind::Step),
                 5 => self.nested(depth, "for item in items", Kind::For),
                 6 => self.choice(depth),
-                _ => self.together(depth),
+                7 => self.together(depth),
+                _ => self.structured(depth).map_err(String::from),
             };
             written?;
         }
@@ -563,13 +564,16 @@ impl Script {
     }
 
     /// Every header a statement may be inserted under as its first line.
-    /// `together:` is left out: each line under it is a branch, not a
-    /// statement.
+    /// `together:` and `graph:` are left out: each line under the one is a
+    /// branch and under the other a node, never a statement.
     fn openers(&self) -> Vec<usize> {
         self.lines
             .iter()
             .enumerate()
-            .filter(|&(_, src)| src.opens.is_some_and(|kind| kind != Kind::Together))
+            .filter(|&(_, src)| {
+                src.opens
+                    .is_some_and(|kind| !matches!(kind, Kind::Together | Kind::Graph))
+            })
             .map(|(index, _)| index)
             .collect()
     }
@@ -852,3 +856,4 @@ fn nested_plant_family(first: u64, count: u64) -> Result<u64, String> {
 mod bands;
 mod labels;
 mod passthrough;
+mod structured;

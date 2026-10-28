@@ -2,7 +2,7 @@
 
 <!-- Generated from `LEXICON` in crates/lgwks-ast/src/script/lexicon.rs by the test `the_lexicon_page_is_rendered_from_the_lexicon` in lgwks_macros. Edit the table, not this page. -->
 
-Pages: [page 1](script-lexicon.md) · page 2 · [page 3](script-lexicon-3.md).
+Pages: [page 1](script-lexicon.md) · page 2 · [page 3](script-lexicon-3.md) · [page 4](script-lexicon-4.md).
 
 ## `for`
 

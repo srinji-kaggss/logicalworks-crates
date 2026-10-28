@@ -305,4 +305,18 @@ pub enum StepKind {
     Fail,
     /// `give back ..`. The header is in [`StepShape::detail`].
     GiveBack,
+    /// `graph[, at most N at once]:`; the subject is `N`, and its children are
+    /// its nodes.
+    Graph,
+    /// `node name[ needs a, b]:` inside a `graph`; the subject is the name.
+    Node,
+    /// `saga name:`; the subject is the name.
+    Saga,
+    /// `compensate step:` inside a `saga`; the subject is the step it undoes.
+    Compensate,
+    /// `whenever x in feed, buffering N, <overflow>:`; the subject is the
+    /// buffer and its overflow policy.
+    Whenever,
+    /// `justify with (rules):`; the subject is the rules as written.
+    Justify,
 }

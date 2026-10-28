@@ -2,46 +2,64 @@
 //!
 //! Money must be refunded, a booking released, a reservation cancelled: real
 //! structure with real ordering guarantees, not a line of passthrough Rust no
-//! map can see. A [`Compensations`] registrar is handed to the guarded body;
-//! each finished step registers its undo, and when a later step fails the
-//! stack runs in reverse order, once, before the failure is returned. A run
-//! that succeeds runs no compensation.
+//! map can see. In `script!` this is `saga name:`, with a `compensate step:`
+//! block after each step it undoes. A [`Compensations`] registrar is handed to
+//! the guarded body; each finished step registers its undo, and when a later
+//! step fails the stack runs in reverse order, once, before the failure is
+//! returned. A run that succeeds runs no compensation.
 //!
 //! The registrar is an owned handle over a shared stack, so the body holds it
 //! across awaits with no borrow of the caller and no lock held across an
-//! await: each registration locks, pushes, and unlocks synchronously. The
-//! trail shows every compensation as the step it is: each undo runs in a
-//! scope of its own, entered and settled like any other, so a reader reviewing
-//! the map sees the refund the flow performed, not only the charge. When every
-//! undo succeeds the caller gets the body's failure; when an undo fails the
-//! caller gets the undo's failure, because the run's state is then the bigger
-//! problem. Cross-resume replay of compensations is not wired yet: a resumed
-//! run replays finished steps from the store, and the compensations of a run
-//! that failed before a resume are the resume's own to register.
+//! await: each registration locks, pushes and unlocks synchronously. The stack
+//! is bounded by [`MAX_COMPENSATIONS`]: a registration past it fails the saga,
+//! never grows memory.
+//!
+//! Each undo runs in a scope of its own, `<saga>/undo:<step>`, entered and
+//! settled like any other step, so the trail shows the refund the flow made and
+//! not only the charge, and an undo never shares the key of the step it
+//! reverses. Every undo runs even when an earlier one failed. When every undo
+//! succeeds the caller gets the body's failure; when one fails the caller gets
+//! the first undo failure, because the run's state is then the bigger problem,
+//! and every failed undo is settled as failed on its own trail entry and
+//! logged, so none is dropped silently. An undo that must survive a transient
+//! fault says so itself: `retry up to N times:` inside the `compensate` block
+//! spends the run's retry budget like any other retry. A resumed run replays
+//! finished steps from the store, and the compensations of a run that failed
+//! before a resume are the resume's own to register.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use crate::journal::frame::SaturatingFrom;
+
+use super::trail::Site;
 use super::{FlowError, Scope};
 
-/// An undo a finished step registers: a scope in, nothing or a failure out.
+/// The most undos one saga registers.
+///
+/// A saga's steps are written, not generated, so a stack this deep is a loop
+/// registering without end; refusing past it keeps the stack a bound, not a
+/// leak.
+pub const MAX_COMPENSATIONS: usize = 4_096;
+
+/// An undo a finished step registers, as awaited.
 ///
 /// `Send` like every other body the runtime drives: an undo held by one task
 /// may be registered from any thread the flow runs on.
 type UndoFut<'a> = Pin<Box<dyn Future<Output = Result<(), FlowError>> + Send + 'a>>;
-/// The boxed undo itself.
+/// The boxed undo itself: a scope in, run at most once.
 type UndoFn<'a> = Box<dyn FnOnce(Scope) -> UndoFut<'a> + Send + 'a>;
 
-/// An undo registered for one finished step, run at most once.
+/// An undo registered for one finished step.
 struct Undo<'a> {
-    /// The finished step's label, entered again when the undo runs.
+    /// The finished step's label; the undo runs as `undo:<step>`.
     step: &'static str,
     /// The undo itself.
     run: UndoFn<'a>,
 }
 
-/// The registrar one guarded body registers its undos on.
+/// The registrar one saga's body registers its undos on.
 ///
 /// Created by [`compensated`] and handed to the body by value: the body holds
 /// it across awaits, and every registration is one synchronous lock, push and
@@ -64,11 +82,31 @@ impl<'a> Compensations<'a> {
     }
 
     /// Register `undo` for the finished step `step`.
-    pub fn add(&self, step: &'static str, undo: impl FnOnce(Scope) -> UndoFut<'a> + Send + 'a) {
-        self.locked().push(Undo {
+    ///
+    /// # Errors
+    ///
+    /// [`FlowError::InvalidBound`] when [`MAX_COMPENSATIONS`] are already
+    /// registered; the undo is not registered.
+    pub fn add<F, Fut>(&self, step: &'static str, undo: F) -> Result<(), FlowError>
+    where
+        F: FnOnce(Scope) -> Fut + Send + 'a,
+        Fut: Future<Output = Result<(), FlowError>> + Send + 'a,
+    {
+        let mut stack = self.locked();
+        if stack.len() >= MAX_COMPENSATIONS {
+            let refusal = Err(FlowError::InvalidBound {
+                what: "saga: compensations registered",
+                value: u64::saturating_from(stack.len().saturating_add(1)),
+                max: u64::saturating_from(MAX_COMPENSATIONS),
+            });
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), step, "add: refusing an undo past the bound");
+            return refusal;
+        }
+        stack.push(Undo {
             step,
-            run: Box::new(undo),
+            run: Box::new(move |scope| Box::pin(undo(scope))),
         });
+        Ok(())
     }
 
     /// How many undos are registered.
@@ -95,29 +133,32 @@ impl<'a> Compensations<'a> {
         }
     }
 
-    /// Run the stack in reverse registration order, once, each undo in a scope
-    /// of its own under `scope`.
+    /// Run the stack in reverse registration order, once, each undo in its own
+    /// scope `undo:<step>` under `scope`.
     ///
-    /// Every undo runs even when an earlier one failed: a half-compensated run
-    /// reports every failure, and the first undo failure is the one returned.
-    /// Returns the first undo failure, or `None` when every undo succeeded.
+    /// Every undo runs even when an earlier one failed. Returns the first undo
+    /// failure, or `None` when every undo succeeded; every failure is settled
+    /// on its own scope and logged.
     async fn run_all(self, scope: &Scope) -> Option<FlowError> {
         let undos: Vec<Undo<'a>> = std::mem::take(&mut *self.locked());
         let mut first: Option<FlowError> = None;
         for undo in undos.into_iter().rev() {
             let Undo { step, run } = undo;
-            let outcome = match scope.enter(step) {
+            // `undo:<step>`, never `<step>`: the undo is its own effect, so it
+            // carries its own key and never replays as the step it reverses.
+            let outcome = match scope.enter(&format!("undo:{step}")) {
                 Ok(undo_scope) => {
                     let finished = run(undo_scope.clone()).await;
                     undo_scope.settle(&finished);
-                    finished
+                    finished.map_err(|error| error.located(&undo_scope))
                 }
                 Err(error) => Err(error),
             };
-            if first.is_none()
-                && let Err(failed) = outcome
-            {
-                first = Some(failed);
+            if let Err(failed) = outcome {
+                lgwks_std::trace::warn!(error = %failed, step, "run_all: an undo failed; the rest still run");
+                if first.is_none() {
+                    first = Some(failed);
+                }
             }
         }
         first
@@ -148,17 +189,50 @@ where
     F: FnOnce(Scope, Compensations<'a>) -> Fut,
     Fut: Future<Output = Result<T, FlowError>>,
 {
-    let here = scope.enter(step)?;
+    saga_from(scope, step, None, body).await
+}
+
+#[doc(hidden)]
+/// [`compensated`] for a `saga name:` that `script!` wrote at `site`, which
+/// the saga's trail entry carries. Called by `script!`.
+///
+/// # Errors
+///
+/// As [`compensated`].
+pub async fn compensated_at<'a, T, F, Fut>(
+    scope: &Scope,
+    step: &str,
+    site: &'static Site,
+    body: F,
+) -> Result<T, FlowError>
+where
+    F: FnOnce(Scope, Compensations<'a>) -> Fut,
+    Fut: Future<Output = Result<T, FlowError>>,
+{
+    saga_from(scope, step, Some(site), body).await
+}
+
+/// The body of [`compensated`] and [`compensated_at`].
+async fn saga_from<'a, T, F, Fut>(
+    scope: &Scope,
+    step: &str,
+    site: Option<&'static Site>,
+    body: F,
+) -> Result<T, FlowError>
+where
+    F: FnOnce(Scope, Compensations<'a>) -> Fut,
+    Fut: Future<Output = Result<T, FlowError>>,
+{
+    let here = scope.enter_from(step, site)?;
     let stack = Compensations::new();
     let outcome = body(here.clone(), stack.clone()).await;
     let finished = match outcome {
         Ok(value) => Ok(value),
         Err(failed) => {
             let located = failed.located(&here);
-            if let Some(undo_failed) = stack.run_all(&here).await {
-                Err(undo_failed)
-            } else {
-                Err(located)
+            match stack.run_all(&here).await {
+                Some(undo_failed) => Err(undo_failed),
+                None => Err(located),
             }
         }
     };
@@ -170,7 +244,7 @@ where
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::compensated;
+    use super::{MAX_COMPENSATIONS, compensated};
     use crate::script::{FlowError, Scope, Tenant};
 
     /// A test's result: an error fails it with the error's text.
@@ -191,19 +265,13 @@ mod tests {
                         return Err(FlowError::failed(step));
                     }
                     let order = Arc::clone(&order);
-                    compensations.add(step, move |undo_scope| {
-                        let order = Arc::clone(&order);
-                        Box::pin(async move {
-                            let _ = undo_scope;
-                            match order.lock() {
-                                Ok(mut held) => held.push(step),
-                                Err(_) => {
-                                    return Err(FlowError::failed("the undo order was poisoned"));
-                                }
-                            }
-                            Ok(())
-                        })
-                    });
+                    compensations.add(step, move |_undo_scope| async move {
+                        match order.lock() {
+                            Ok(mut held) => held.push(step),
+                            Err(_) => return Err(FlowError::failed("the undo order was poisoned")),
+                        }
+                        Ok(())
+                    })?;
                 }
                 Ok("ticket")
             }
@@ -236,6 +304,59 @@ mod tests {
             order_of(&order)?,
             vec!["charge", "reserve"],
             "compensations run in reverse registration order, once"
+        );
+        Ok(())
+    }
+
+    /// An undo runs in `<saga>/undo:<step>`, never in the scope of the step it
+    /// reverses, so the two never share a key.
+    #[test]
+    fn an_undo_runs_under_its_own_key() -> TestResult {
+        let paths: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let scope = Scope::root(Tenant::new("acme").map_err(|error| error.to_string())?);
+        let recorded = Arc::clone(&paths);
+        let outcome = crate::block_on(compensated(
+            &scope,
+            "booking",
+            |_scope, compensations| async move {
+                compensations.add("charge", move |undo_scope: Scope| async move {
+                    if let Ok(mut held) = recorded.lock() {
+                        held.push(undo_scope.path().to_owned());
+                    }
+                    Ok(())
+                })?;
+                Err::<(), FlowError>(FlowError::failed("issue"))
+            },
+        ));
+        assert!(outcome.is_err(), "the saga fails at its issue");
+        let paths = paths
+            .lock()
+            .map_err(|error| format!("the path log was poisoned: {error}"))?;
+        assert_eq!(
+            *paths,
+            vec![String::from("booking/undo:charge")],
+            "the undo's scope is its own"
+        );
+        Ok(())
+    }
+
+    /// A saga that registers past the bound fails instead of growing.
+    #[test]
+    fn a_stack_past_its_bound_is_refused() -> TestResult {
+        let scope = Scope::root(Tenant::new("acme").map_err(|error| error.to_string())?);
+        let outcome = crate::block_on(compensated(
+            &scope,
+            "flood",
+            |_scope, compensations| async move {
+                for _ in 0..=MAX_COMPENSATIONS {
+                    compensations.add("step", |_undo: Scope| async { Ok(()) })?;
+                }
+                Ok::<(), FlowError>(())
+            },
+        ));
+        assert!(
+            matches!(outcome, Err(FlowError::InvalidBound { .. })),
+            "the registration past the bound fails the saga: {outcome:?}"
         );
         Ok(())
     }

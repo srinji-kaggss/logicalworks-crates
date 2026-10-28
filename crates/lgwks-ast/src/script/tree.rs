@@ -18,6 +18,10 @@ use lgwks_deps::proc_macro2::{Delimiter, Ident, Span, TokenStream, TokenTree};
 
 use super::lexicon::Kind;
 
+mod vocab;
+
+pub use vocab::{Compensate, Graph, Justify, Node, Overflow, Whenever};
+
 /// A whole `script!` block: its flows, in source order.
 #[derive(Debug, Clone)]
 pub struct Script {
@@ -665,7 +669,9 @@ macro_rules! site_of {
     )*};
 }
 
-site_of!(Each, Within, Retry, Step, For, Call, Domain);
+site_of!(
+    Each, Within, Retry, Step, For, Call, Domain, Graph, Node, Compensate, Whenever, Justify,
+);
 
 /// A flow's entry in the architecture map.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -847,6 +853,8 @@ pub enum Statement {
         /// The reason, as written.
         reason: Code,
     },
+    /// `compensate <step>:` inside a `saga`: registers the undo of a step.
+    Compensate(Compensate),
 }
 
 impl Statement {
@@ -861,7 +869,8 @@ impl Statement {
             | Self::Together(_)
             | Self::For(_)
             | Self::GiveBack(_)
-            | Self::Fail { .. } => false,
+            | Self::Fail { .. }
+            | Self::Compensate(_) => false,
         }
     }
 
@@ -877,7 +886,8 @@ impl Statement {
             | Self::Bind { .. }
             | Self::Construct(_)
             | Self::Together(_)
-            | Self::For(_) => false,
+            | Self::For(_)
+            | Self::Compensate(_) => false,
         }
     }
 
@@ -889,7 +899,8 @@ impl Statement {
     }
 }
 
-/// A block word with its own async body: `each`, `within`, `retry`, `step`.
+/// A block word with its own async body: `each`, `within`, `retry`, `step`,
+/// `graph`, `saga`, `whenever`, `justify`.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Construct {
@@ -901,6 +912,14 @@ pub enum Construct {
     Retry(Retry),
     /// `step <name>:`.
     Step(Step),
+    /// `graph[, at most (limit) at once]:` and its `node`s.
+    Graph(Graph),
+    /// `saga <name>:`, whose body may `compensate` its steps.
+    Saga(Step),
+    /// `whenever <pattern> in <batches>, buffering <N>, <overflow>:`.
+    Whenever(Whenever),
+    /// `justify with (<rules>):`.
+    Justify(Justify),
 }
 
 /// What a `together:` branch runs.
