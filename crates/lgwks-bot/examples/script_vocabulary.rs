@@ -1,20 +1,21 @@
 //! script! vocabulary on the real run path: justification, graphs,
 //! compensation, streams and typed domains, driven end to end.
 //!
-//! Each flow below names one of the runtime vocabularies beside its steps and
-//! runs it through the public interface: a justification WAF that stops a run
-//! with its reason code, a needs-ordered lane graph whose failure blocks only
-//! downstream, compensations that undo in reverse order, a bounded live feed,
-//! and typed observe/act calls against a stub registry. `main` runs every
+//! Each flow below says one of the structured words, `justify`, `saga`,
+//! `graph` and `whenever`, and runs it through the public interface: a
+//! justification WAF that stops a run with its reason code, a needs-ordered
+//! lane graph whose failure blocks only downstream, compensations that undo in
+//! reverse order, a bounded live feed, and typed observe/act calls against a
+//! stub registry. `main` runs every
 //! flow, checks what each one reports, and prints the trail.
 
 use std::error::Error;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lgwks_bot::script::{
-    FlowError, GraphNode, GraphReport, NodeOutcome, Overflow, PumpReport, Scope, StreamGate,
-    Tenant, TypedAction, TypedSource, act_typed, map_domain, observe_typed,
+    FlowError, GraphNode, GraphReport, Justify, NodeOutcome, Overflow, PumpReport, Scope,
+    StreamGate, Tenant, TypedAction, TypedSource, act_typed, map_domain, observe_typed,
 };
 use lgwks_bot::task::{Host, task};
 use lgwks_bot::{Action, Auth, BotError, Execute, GrantSet, Observe, Source, domains};
@@ -134,74 +135,64 @@ impl TypedAction for TypedDemoPage {
     type Error = DemoFailed;
 }
 
+/// The issue step of a booking: fails when the caller seeds it, logged first.
+fn issue(fail: bool) -> Result<&'static str, FlowError> {
+    if fail {
+        let refusal = Err(FlowError::failed("issue"));
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "booking: failing the seeded step");
+        return refusal;
+    }
+    Ok("ticket")
+}
+
+/// The feed's next batch; `None` once it is drained.
+fn next_batch(feed: &Mutex<Vec<Vec<u32>>>) -> Option<Vec<u32>> {
+    feed.lock().ok()?.pop()
+}
+
 lgwks_bot::script! {
-    /// Poll under justification: an allowance of two polls, so the third
-    /// evaluation stops the run with its reason code.
-    flow capped_polls() -> u16:
-        let justified = scope.with_justification(lgwks_bot::script::Justify::new(vec![
-            lgwks_bot::script::Rule::allowance("polls", Arc::new(lgwks_bot::script::Allowance::new(2)), "poll-budget-spent"),
-        ]))
-        let scope = &justified
-        let seen = retry up to 6 times, waiting (Duration::ZERO):
-            fail transiently with "the upstream is down"
+    /// Poll under justification: an allowance of two evaluations, so the
+    /// block's entry and the first attempt pass and the second attempt stops
+    /// the run with its reason code.
+    flow capped_polls(rules: &Justify) -> u16:
+        let seen = justify with (rules):
+            retry up to 6 times, waiting (Duration::ZERO):
+                fail transiently with "the upstream is down"
         give back seen
 
-    /// Book a seat, charging the card: compensations undo in reverse order
-    /// when issuing fails.
+    /// Book a seat, charging the card: the finished steps are undone, newest
+    /// first, when issuing fails.
     flow booking(fail: bool) -> &'static str:
-        let undone = lgwks_bot::script::compensated(scope, "booking", |_scope, compensations| async move {
-            for step in ["reserve", "charge", "issue"] {
-                if fail && step == "issue" {
-                    let refusal = Err::<(), lgwks_bot::script::FlowError>(lgwks_bot::script::FlowError::failed(step));
-                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "booking: failing the seeded step");
-                    return refusal;
-                }
-                compensations.add(step, move |_undo| {
-                    Box::pin(async move {
-                        Ok::<(), lgwks_bot::script::FlowError>(())
-                    })
-                });
-            }
-            Ok(())
-        }).await?
-        let _ = undone
-        give back "ticket"
+        let ticket = saga booking:
+            step reserve:
+                1_u8
+            compensate reserve:
+                lgwks_std::trace::info!("booking: releasing the seat")
+            step charge:
+                2_u8
+            compensate charge:
+                lgwks_std::trace::info!("booking: refunding the card")
+            step issue:
+                issue(fail)?
+        give back ticket
 
     /// Run the lanes as a dependency graph: fetch twice, merge, publish.
     flow lanes() -> GraphReport<u64>:
-        let nodes = vec![
-            lgwks_bot::script::GraphNode::new("fetch-a", &[], move |_scope| {
-                Box::pin(async move { Ok::<u64, lgwks_bot::script::FlowError>(1) })
-            }).with_work(1),
-            lgwks_bot::script::GraphNode::new("fetch-b", &[], move |_scope| {
-                Box::pin(async move { Ok::<u64, lgwks_bot::script::FlowError>(2) })
-            }).with_work(1),
-            lgwks_bot::script::GraphNode::new("merge", &["fetch-a", "fetch-b"], move |_scope| {
-                Box::pin(async move { Ok::<u64, lgwks_bot::script::FlowError>(3) })
-            }).with_work(2),
-            lgwks_bot::script::GraphNode::new("publish", &["merge"], move |_scope| {
-                Box::pin(async move { Ok::<u64, lgwks_bot::script::FlowError>(4) })
-            }).with_work(1),
-        ]
-        let report = lgwks_bot::script::graph(scope, "lanes", 2, nodes).await?
+        let report = graph, at most (2) at once:
+            node fetch_a:
+                1_u64
+            node fetch_b:
+                2_u64
+            node merge needs fetch_a, fetch_b:
+                3_u64
+            node publish needs merge:
+                4_u64
         give back report
 
-    /// React to a seeded feed through a bounded gate.
-    flow prices() -> PumpReport:
-        let mut gate = lgwks_bot::script::StreamGate::new(4, lgwks_bot::script::Overflow::DropOldest).map_err(lgwks_bot::script::FlowError::failed)?
-        let pending: std::cell::RefCell<Vec<Option<Vec<u32>>>> = std::cell::RefCell::new(
-            vec![None, Some(vec![4, 5]), Some(vec![1, 2, 3])],
-        )
-        let report = lgwks_bot::script::pump(
-            scope,
-            "prices",
-            &mut gate,
-            || {
-                let batch = pending.borrow_mut().pop().flatten();
-                async move { batch }
-            },
-            |_, _| async move { Ok::<(), lgwks_bot::script::FlowError>(()) },
-        ).await?
+    /// React to a seeded feed through a bounded buffer.
+    flow prices(feed: &Mutex<Vec<Vec<u32>>>) -> PumpReport:
+        let report = whenever price in next_batch(feed), buffering 4, drop oldest:
+            price
         give back report
 }
 
@@ -211,7 +202,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut out = std::io::stdout().lock();
     let scope = Scope::root(Tenant::new("demo").map_err(|error| error.to_string())?);
-    let blocked = lgwks_bot::block_on(capped_polls(&scope));
+    let budget = Justify::new(vec![lgwks_bot::script::Rule::allowance(
+        "polls",
+        Arc::new(lgwks_bot::script::Allowance::new(2)),
+        "poll-budget-spent",
+    )]);
+    let blocked = lgwks_bot::block_on(capped_polls(&scope, &budget));
     check(
         matches!(blocked, Err(FlowError::Justified { .. })),
         "a stop must be justified",
@@ -243,7 +239,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let report = lgwks_bot::block_on(lanes(&scope)).map_err(|error| format!("{error}"))?;
     check(report.is_ok(), "every lane ran to a value")?;
     check(
-        report.succeeded() == vec!["fetch-a", "fetch-b", "merge", "publish"],
+        report.succeeded() == vec!["fetch_a", "fetch_b", "merge", "publish"],
         "every lane ran in needs order",
     )?;
     check(report.failed().is_empty(), "no lane failed")?;
@@ -262,7 +258,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     writeln!(out, "graph: lanes ran {:?}", report.succeeded())
         .map_err(|error| format!("the report was not written: {error}"))?;
 
-    let feed = lgwks_bot::block_on(prices(&scope)).map_err(|error| format!("{error}"))?;
+    let pending = Mutex::new(vec![vec![4, 5], vec![1, 2, 3]]);
+    let feed = lgwks_bot::block_on(prices(&scope, &pending)).map_err(|error| format!("{error}"))?;
     check(feed.handled == 5, "every feed event was handled")?;
     check(feed.dropped == 0, "a feed inside the bound sheds nothing")?;
     check(feed.refused == 0, "a feed inside the bound refuses nothing")?;
@@ -333,11 +330,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     writeln!(out, "justify: paced rule answers {word}")
         .map_err(|error| format!("the report was not written: {error}"))?;
 
-    let node = GraphNode::new("probe", &["fetch-a"], move |_scope| {
+    let node = GraphNode::new("probe", &["fetch_a"], move |_scope| {
         Box::pin(async move { Ok::<u64, FlowError>(0) })
-    });
+    })
+    .with_work(2);
     check(node.name() == "probe", "a node carries its name")?;
-    check(node.needs() == ["fetch-a"], "a node carries its needs")?;
+    check(node.needs() == ["fetch_a"], "a node carries its needs")?;
     check(
         lgwks_bot::script::MAX_GRAPH_NODES == 4_096,
         "the graph admits more lanes than any lane graph needs",

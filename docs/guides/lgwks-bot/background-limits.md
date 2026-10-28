@@ -41,7 +41,7 @@ The grace is time and not a count of yields, which matters on a multi-threaded
 runtime: `yield_now` only reschedules the yielding task, so it cannot give a body
 parked on another worker the thread wakeup its return actually needs, and a
 counted grace reported cancelled work as aborted
-(`crates/lgwks-bot/src/rt/supervise.rs:523`). A body that returns is settled the
+(`crates/lgwks-bot/src/rt/supervise.rs:525`). A body that returns is settled the
 moment it does, so the grace is a ceiling on the wait and not a cost charged to
 every shutdown.
 

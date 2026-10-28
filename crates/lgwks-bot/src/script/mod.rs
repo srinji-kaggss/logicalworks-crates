@@ -39,13 +39,17 @@
 //! [`Plan`](crate::proposal::Plan) of operation *names*; it performs nothing and
 //! is not a fifth verb.
 //!
-//! Four more runtimes sit beside the words, called from ordinary Rust rather
-//! than new grammar: [`Justify`] evaluates allow/slow/park/block rules before
-//! every async word and retry attempt; [`graph`] runs a needs-ordered,
-//! capacity-bounded dependency graph whose failures block only downstream;
-//! [`compensated`] runs a [`Compensations`] stack in reverse order when its
-//! body fails; and [`pump`] reacts to each event of a live feed through a
-//! bounded [`StreamGate`]. Typed domains ([`TypedSource`], [`TypedAction`])
+//! Four more words reach four more runtimes: `justify with (rules):` puts a
+//! block under [`Justify`], which evaluates allow/slow/park/block rules before
+//! every async word and retry attempt; `graph:` with its `node name needs a:`
+//! lines runs [`graph`], a needs-ordered, capacity-bounded dependency graph
+//! scheduled greedily by critical path, whose failures block only downstream;
+//! `saga name:` with its `compensate step:` blocks runs [`compensated`], a
+//! bounded [`Compensations`] stack undone in reverse order when the body
+//! fails; and `whenever x in feed, buffering N, drop oldest:` runs [`pump`]
+//! over each event of a live feed through a bounded [`StreamGate`]. Each is
+//! also an ordinary function for code that is not a `script!` flow. Typed
+//! domains ([`TypedSource`], [`TypedAction`])
 //! name the registry identifier and the value types at the call site, over the
 //! same erased registry the words resolve against.
 //!
@@ -128,13 +132,13 @@ pub use admit::{
     Gate, RefusalRecord, admit, intervention_of, provenance_of, read_refusal, refusal_of,
     refusal_record,
 };
-pub use compensate::{Compensations, compensated};
+pub use compensate::{Compensations, MAX_COMPENSATIONS, compensated, compensated_at};
 pub use control::{at_most, attempts, retry, retry_at, within, within_at, within_on};
 pub use domain::{Acted, DomainUse, act, admit_domains, observe};
 pub use each::{each, each_at};
 pub use error::{FlowError, OptionExt, ResultExt};
 pub use fan_out::{FanOut, FanOutError};
-pub use graph::{GraphNode, GraphReport, MAX_GRAPH_NODES, NodeOutcome, graph};
+pub use graph::{GraphNode, GraphReport, MAX_GRAPH_NODES, NodeOutcome, graph, graph_at};
 pub use justify::{Allowance, Decision, Justify, JustifyCtx, Rule, Verdict};
 pub use map::{Architecture, FlowShape, Passthrough, StepKind, StepShape};
 pub(crate) use policy::Policy;
@@ -145,7 +149,7 @@ pub use ready::{
 pub use rt_clock::Clock;
 pub use run_store::{Appended, Durable, remember};
 pub use scope::{Scope, StepKey, Tenant};
-pub use stream::{Overflow, PumpReport, StreamGate, pump};
+pub use stream::{Overflow, PumpReport, StreamGate, pump, stream_at};
 pub use trail::{Outcome, ScriptTrail, Site, TrailEntry};
 pub use typed::{TypedAction, TypedSource, act_typed, map_domain, observe_typed};
 

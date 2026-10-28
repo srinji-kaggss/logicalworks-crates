@@ -36,6 +36,13 @@
 //! | `act domain::id on target with value` | run the action the host's registry declares under `domain::id`, built from `target`, on `value`, as a step of its own |
 //! | `give back value` | return from the flow |
 //! | `fail with reason` / `fail transiently with reason` | stop with a permanent / retryable failure |
+//! | `graph:` with `node name[ needs a, b]:` under it | every node once, each as soon as the nodes it needs have succeeded, longest remaining chain first, as many at once as the machine sustains; the value is the run's `GraphReport` |
+//! | `graph, at most (limit) at once:` | the same, under a limit that comes from somewhere named |
+//! | `node name[ needs a, b]:` | one node of the enclosing `graph`: its body runs once, after `a` and `b` have succeeded |
+//! | `saga name:` with `compensate step:` after the steps it undoes | a named scope whose finished steps are undone, newest first, when a later line fails; its value is the body's |
+//! | `compensate step:` | the undo of `step`, registered once that step has finished, run only if the saga later fails |
+//! | `whenever x in batches, buffering N, drop oldest:` (or `drop newest`, `refuse`) | each event of a live feed in arrival order, each in its own scope; `batches` is awaited for the next `Option<Vec<_>>` and `None` ends the feed; at most `N` events wait, and past that the policy decides; the value is the run's `PumpReport` |
+//! | `justify with (rules):` | the block in a scope that answers to `rules`: every step, node and retry attempt inside asks them first, and is slowed, parked or stopped as they decide |
 //!
 //! Every step keys by tenant, run and path (`Scope::key`): one run's attempts
 //! and restarts share a key, two runs of one flow never do, and work that is
@@ -56,8 +63,11 @@
 //! `unbounded_channel`, `block_on`, `thread::sleep`, `process::exit`,
 //! `process::abort`, `mem::forget`, `unsafe`; a `use` inside a flow that would
 //! rename any of those; absolute paths from one machine anywhere in a string;
-//! `give back` from inside a block whose value is its own last line; and a
-//! flow that promises an output but ends without one.
+//! `give back` from inside a block whose value is its own last line; a flow
+//! that promises an output but ends without one; a `graph` whose needs repeat,
+//! name no node or form a cycle; a `node` outside a `graph`; a `compensate`
+//! outside a `saga` or naming no step before it; a `whenever` with no buffer
+//! or no overflow policy; and a `justify` with no rules.
 //!
 //! A macro sees tokens, not resolved names, so a call imported *outside* the
 //! script under another spelling is invisible to those refusals. Every

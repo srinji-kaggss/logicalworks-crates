@@ -16,7 +16,8 @@
 "crates/lgwks-ast/src/script/json.rs" = 1
 "crates/lgwks-ast/src/script/lexicon.rs" = 23
 "crates/lgwks-ast/src/script/mod.rs" = 9
-"crates/lgwks-ast/src/script/tree.rs" = 95
+"crates/lgwks-ast/src/script/tree.rs" = 96
+"crates/lgwks-ast/src/script/tree/vocab.rs" = 23
 "crates/lgwks-bot/src/broker.rs" = 15
 "crates/lgwks-bot/src/cap.rs" = 35
 "crates/lgwks-bot/src/cas.rs" = 31
@@ -110,7 +111,7 @@
 "crates/lgwks-bot/src/rt/tenancy.rs" = 33
 "crates/lgwks-bot/src/rt/time.rs" = 19
 "crates/lgwks-bot/src/script/admit.rs" = 20
-"crates/lgwks-bot/src/script/compensate.rs" = 6
+"crates/lgwks-bot/src/script/compensate.rs" = 7
 "crates/lgwks-bot/src/script/control.rs" = 3
 "crates/lgwks-bot/src/script/domain.rs" = 8
 "crates/lgwks-bot/src/script/each.rs" = 1

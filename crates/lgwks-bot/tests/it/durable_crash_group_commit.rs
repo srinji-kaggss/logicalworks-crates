@@ -412,6 +412,14 @@ fn sigkill(child: &mut std::process::Child, test_name: &str) -> Result<(), Box<d
             "the probe for {test_name} must have been killed, not exited: {status}"
         );
     }
+    // std kills with `TerminateProcess(handle, 1)`, so a killed probe reads exit
+    // code 1 where Unix reads signal 9.
+    #[cfg(not(unix))]
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "the probe for {test_name} must have been killed, not exited: {status}"
+    );
     Ok(())
 }
 

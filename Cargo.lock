@@ -4535,7 +4535,7 @@ checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
 name = "lgwks_ast"
-version = "3.1.0"
+version = "4.0.0"
 dependencies = [
  "ast-grep-core",
  "ast-grep-language",
@@ -4549,7 +4549,7 @@ dependencies = [
 
 [[package]]
 name = "lgwks_bot"
-version = "5.0.0"
+version = "6.0.0"
 dependencies = [
  "lgwks_ast",
  "lgwks_deps",
@@ -4560,7 +4560,7 @@ dependencies = [
 
 [[package]]
 name = "lgwks_deps"
-version = "5.1.0"
+version = "5.1.1"
 dependencies = [
  "appcui",
  "axum",
@@ -4586,7 +4586,7 @@ dependencies = [
 
 [[package]]
 name = "lgwks_macros"
-version = "1.1.6"
+version = "1.2.0"
 dependencies = [
  "lgwks_ast",
  "lgwks_deps",
@@ -4595,7 +4595,7 @@ dependencies = [
 
 [[package]]
 name = "lgwks_std"
-version = "3.2.0"
+version = "3.2.1"
 dependencies = [
  "blake3",
  "ed25519-dalek",

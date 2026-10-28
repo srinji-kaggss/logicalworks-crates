@@ -1,7 +1,9 @@
 //! Bounded live streams with a declared overflow policy (#654).
 //!
 //! A live feed — prices, events, ticks — is a buffer with a bound, an overflow
-//! policy and a cancellation: [`StreamGate`] holds at most `cap` unhandled
+//! policy and a cancellation. In `script!` it is
+//! `whenever x in batches, buffering N, drop oldest:` (or `drop newest`,
+//! `refuse`), which builds its own gate. [`StreamGate`] holds at most `cap` unhandled
 //! events, and every event past the cap follows the declared policy instead of
 //! growing memory until the process dies. [`pump`] reacts to each event of the
 //! feed in turn, in its own scope with its own key, and stops when the feed
@@ -16,8 +18,10 @@
 use std::future::Future;
 
 use crate::dist_lease::{QueueError, WorkQueue};
+use crate::journal::frame::SaturatingFrom;
 
-use super::{FlowError, Scope};
+use super::trail::Site;
+use super::{FlowError, MAX_IN_FLIGHT, Scope};
 
 /// What happens to an event past the buffer's cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,7 +157,7 @@ pub struct PumpReport {
 /// retained event is handled in turn, each in its own scope with its own key,
 /// before the next batch is read. A stop ends the pump as
 /// [`FlowError::Cancelled`] with nothing left running; a handler failure ends
-/// it with that failure.
+/// it with that failure. Either way the pump's step is settled.
 ///
 /// # Errors
 ///
@@ -172,65 +176,129 @@ where
     GFut: Future<Output = Result<(), FlowError>>,
 {
     let here = scope.enter(step)?;
-    let mut handled: u64 = 0;
-    let mut index: usize = 0;
-    let finished = loop {
-        here.checkpoint()?;
-        let batch = match recv().await {
-            Some(batch) => batch,
-            None => break Ok(()),
-        };
-        for item in batch {
-            let mut item = item;
-            loop {
-                match gate.push(item) {
-                    Ok(()) => break,
-                    Err(returned) => {
-                        // Backpressure: a refusal means the gate is full, so
-                        // handle the oldest retained event to make room, then
-                        // retry. The gate never holds past its cap, and no
-                        // event is shed while the consumer keeps up.
-                        if let Some(older) = gate.pop() {
-                            handle_next(&here, index, older, &mut handle).await?;
-                            index = index.saturating_add(1);
-                            handled = handled.saturating_add(1);
-                        }
-                        item = returned;
-                    }
-                }
-            }
-        }
-        while let Some(event) = gate.pop() {
-            handle_next(&here, index, event, &mut handle).await?;
-            index = index.saturating_add(1);
-            handled = handled.saturating_add(1);
-        }
-    };
-    let report = PumpReport {
-        handled,
-        dropped: gate.dropped(),
-        refused: gate.refused(),
-    };
-    let finished: Result<PumpReport, FlowError> = finished.map(|()| report);
+    let finished = drain(
+        &here,
+        gate,
+        async || recv().await,
+        async |event_scope: Scope, event: T| handle(event_scope, event).await,
+    )
+    .await;
     here.settle(&finished);
     finished
 }
 
-/// Handle one event in its own scope, settling the step either way.
-async fn handle_next<T, G, GFut>(
+#[doc(hidden)]
+/// [`pump`] for a `whenever x in batches, buffering N, <overflow>:` block
+/// `script!` wrote at `site`: the gate is built here from the written bound
+/// and policy, so the block owns its buffer and nothing outlives it. Called by
+/// `script!`.
+///
+/// # Errors
+///
+/// [`FlowError::InvalidBound`] for a buffer outside `1..=MAX_IN_FLIGHT`, then
+/// as [`pump`].
+pub async fn stream_at<T, F, G>(
+    scope: &Scope,
+    step: &str,
+    site: &'static Site,
+    cap: usize,
+    overflow: Overflow,
+    recv: F,
+    handle: G,
+) -> Result<PumpReport, FlowError>
+where
+    F: AsyncFnMut() -> Option<Vec<T>>,
+    G: AsyncFnMut(Scope, T) -> Result<(), FlowError>,
+{
+    let mut gate = buffer(cap, overflow)?;
+    let here = scope.enter_at(step, site)?;
+    let finished = drain(&here, &mut gate, recv, handle).await;
+    here.settle(&finished);
+    finished
+}
+
+/// A gate for a written `buffering N`, refused outside `1..=MAX_IN_FLIGHT`:
+/// the same ceiling `each` puts on what it holds at once.
+fn buffer<T>(cap: usize, overflow: Overflow) -> Result<StreamGate<T>, FlowError> {
+    let refused = FlowError::InvalidBound {
+        what: "whenever: buffering N",
+        value: u64::saturating_from(cap),
+        max: u64::saturating_from(MAX_IN_FLIGHT),
+    };
+    if cap > MAX_IN_FLIGHT {
+        let refusal = Err(refused);
+        lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "buffer: returning an error to the caller");
+        return refusal;
+    }
+    match StreamGate::new(cap, overflow) {
+        Ok(gate) => Ok(gate),
+        Err(zero) => {
+            let refusal = Err(refused);
+            lgwks_std::trace::debug!(gate = %zero, error = ?refusal.as_ref().err(), "buffer: a zero buffer is refused");
+            refusal
+        }
+    }
+}
+
+/// The loop of [`pump`] and [`stream_at`], inside the step they entered.
+async fn drain<T, F, G>(
     here: &Scope,
-    index: usize,
+    gate: &mut StreamGate<T>,
+    mut recv: F,
+    mut handle: G,
+) -> Result<PumpReport, FlowError>
+where
+    F: AsyncFnMut() -> Option<Vec<T>>,
+    G: AsyncFnMut(Scope, T) -> Result<(), FlowError>,
+{
+    let mut handled: u64 = 0;
+    loop {
+        here.checkpoint()?;
+        let Some(batch) = recv().await else {
+            break;
+        };
+        for item in batch {
+            let mut item = item;
+            while let Err(returned) = gate.push(item) {
+                // Backpressure: a refusal means the gate is full, so handle
+                // the oldest retained event to make room, then push again. The
+                // gate never holds past its cap, and nothing is shed.
+                item = returned;
+                let Some(older) = gate.pop() else {
+                    let refusal = Err(FlowError::failed("a full buffer had no event to hand on"));
+                    lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "drain: returning an error to the caller");
+                    return refusal;
+                };
+                handle_next(here, handled, older, &mut handle).await?;
+                handled = handled.saturating_add(1);
+            }
+        }
+        while let Some(event) = gate.pop() {
+            handle_next(here, handled, event, &mut handle).await?;
+            handled = handled.saturating_add(1);
+        }
+    }
+    Ok(PumpReport {
+        handled,
+        dropped: gate.dropped(),
+        refused: gate.refused(),
+    })
+}
+
+/// Handle the `index`th event in its own scope, settling the step either way.
+async fn handle_next<T, G>(
+    here: &Scope,
+    index: u64,
     event: T,
     handle: &mut G,
 ) -> Result<(), FlowError>
 where
-    G: FnMut(Scope, T) -> GFut,
-    GFut: Future<Output = Result<(), FlowError>>,
+    G: AsyncFnMut(Scope, T) -> Result<(), FlowError>,
 {
-    let event_scope = here.item("event", index)?;
+    let event_scope = here.item("event", usize::saturating_from(index))?;
     let outcome = handle(event_scope.clone(), event).await;
     event_scope.settle(&outcome);
-    outcome
+    outcome.map_err(|error| error.located(&event_scope))
 }
 
 #[cfg(test)]

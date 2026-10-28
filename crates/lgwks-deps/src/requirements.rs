@@ -307,7 +307,7 @@ fn sha256(data: &[u8]) -> Result<[u32; 8], CheckError> {
     }
     message.extend_from_slice(&bits.to_be_bytes());
     let mut state = INITIAL;
-    let (blocks, _) = message.as_slice().as_chunks::<64>();
+    let (blocks, _) = message.as_chunks::<64>();
     for block in blocks {
         compress(&mut state, block);
     }

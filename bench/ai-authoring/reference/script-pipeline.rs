@@ -84,7 +84,7 @@ lgwks_bot::script! {
         if combined_outcome.is_err():
             record_stage(&failed_later, ai_task_support::StageName::Combine)
             fail with "combine failed"
-        let combined = combined_outcome.or_fail()?
+        let _combined = combined_outcome.or_fail()?
         let published_outcome = stage.run(ai_task_support::StageName::Publish).await
         if published_outcome.is_err():
             record_stage(&failed_later, ai_task_support::StageName::Publish)

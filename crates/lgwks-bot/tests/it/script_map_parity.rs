@@ -166,7 +166,12 @@ fn assert_passthrough(
 /// The probe's source: each file as a module, the tool's reading of it as
 /// `const` assertions on its `ARCHITECTURE`, and one assertion that fails.
 fn probe_source(files: &[(PathBuf, Script)]) -> Result<String, std::fmt::Error> {
-    let mut main = String::new();
+    // Two examples each `#[path]` the same support file, so the probe that
+    // composes them loads it twice; that is the probe's shape, not a defect in
+    // either example.
+    let mut main = String::from(
+        "#![expect(clippy::duplicate_mod, reason = \"the probe composes examples that share one support file\")]\n",
+    );
     for (index, reference) in files.iter().enumerate() {
         let shown = reference.0.display().to_string();
         writeln!(main, "#[path = {shown:?}]\nmod reference_{index};")?;

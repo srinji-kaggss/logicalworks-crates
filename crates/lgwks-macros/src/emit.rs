@@ -22,6 +22,8 @@ use lgwks_deps::quote::{ToTokens, quote};
 
 use crate::error::{Error, Result};
 
+mod vocab;
+
 /// The runtime every expansion calls into.
 fn runtime() -> TokenStream {
     quote!(::lgwks_bot::script)
@@ -251,6 +253,7 @@ fn statement(line: &Statement) -> Result<TokenStream> {
             Ok(quote!(let #pattern = #value?;))
         }
         Statement::Construct(ref block) => construct(block),
+        Statement::Compensate(ref undo) => vocab::compensate(undo),
         Statement::Together(ref branches) => together(branches),
         Statement::For(ref each) => for_loop(each),
         Statement::If(ref chain) => if_chain(chain),
@@ -276,13 +279,18 @@ fn statement(line: &Statement) -> Result<TokenStream> {
     }
 }
 
-/// A block that yields a value: `each`, `within`, `retry`, `step`.
+/// A block that yields a value: `each`, `within`, `retry`, `step`, `graph`,
+/// `saga`, `whenever`, `justify`.
 fn construct(block: &Construct) -> Result<TokenStream> {
     match *block {
         Construct::Each(ref fan) => each(fan),
         Construct::Within(ref deadline) => within(deadline),
         Construct::Retry(ref attempts) => retry(attempts),
         Construct::Step(ref named) => step(named),
+        Construct::Graph(ref declared) => vocab::graph(declared),
+        Construct::Saga(ref named) => vocab::saga(named),
+        Construct::Whenever(ref feed) => vocab::whenever(feed),
+        Construct::Justify(ref block) => vocab::justify(block),
         _ => Err(newer_word("block word")),
     }
 }
@@ -344,7 +352,8 @@ fn retry(attempts: &Retry) -> Result<TokenStream> {
     })
 }
 
-/// `step <name>:`.
+/// `step <name>:`. The step asks its scope's justification before its body,
+/// so a `justify with (rules):` around it can stop it first.
 fn step(named: &Step) -> Result<TokenStream> {
     let script = runtime();
     let label = named.label();
@@ -353,7 +362,10 @@ fn step(named: &Step) -> Result<TokenStream> {
     Ok(quote! {
         {
             let scope = &scope.enter_at(#label, #site)?;
-            let outcome: ::core::result::Result<_, #script::FlowError> = async #inner.await;
+            let outcome: ::core::result::Result<_, #script::FlowError> = async {
+                scope.justified(0).await?;
+                #inner
+            }.await;
             scope.settle(&outcome);
             outcome.map_err(|error| error.located(scope))
         }

@@ -5,8 +5,9 @@ Pages of this README: [overview](README.md) · [execution model](README-executio
 ## Orchestration: `script!`
 
 `script!` (feature `script`, on by default) writes orchestration the way it is
-said: indented flows of `each`, `within`, `retry`, `together`, `step`, `for` and
-`if`, which expand to plain `async fn`s over `lgwks_bot::script`. It exists
+said: indented flows of `each`, `within`, `retry`, `together`, `step`, `for`,
+`if`, `graph`, `saga`, `whenever` and `justify`, which expand to plain
+`async fn`s over `lgwks_bot::script`. It exists
 because orchestration is where generated code fails most: fan-outs with no
 bound, retries with no budget, waits with no deadline, work that loses track of
 which tenant it is for, and a system nobody can see the shape of. The first
@@ -83,6 +84,14 @@ trusted host's partition key, not an authenticated identity. Work that is one
   direct file, network and process paths and `repeat`/`cycle` spellings of an
   endless iterator, and machine-specific absolute paths are compile errors naming
   what to write instead. I/O from a flow runs only through a registered domain.
+- **Structure has words.** `graph:` runs `node name needs a, b:` lines once
+  each, longest remaining chain first (Graham's list scheduling, within
+  W/m + C of the best schedule), and a failure blocks only what depends on
+  it; a cycle is a compile error. `saga name:` undoes every finished step's
+  `compensate` line, newest first, once, each under its own `undo:<step>` key.
+  `whenever x in feed, buffering N, drop oldest:` handles a live feed in
+  arrival order past a bound the author names with the policy. `justify with
+  (rules):` makes every step, node and attempt inside ask the rules first.
 
 `each` runs its bodies on the calling task, not as spawned tasks, so a body may
 borrow the flow's locals: no `Arc`, no `clone`, no `'static`. It polls at most

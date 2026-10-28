@@ -20,6 +20,8 @@ use lgwks_deps::proc_macro2::TokenTree;
 
 use super::lines::{Line, ident};
 
+mod vocab;
+
 /// What a word does, which is what the parser dispatches on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[non_exhaustive]
@@ -54,6 +56,18 @@ pub enum Kind {
     GiveBack,
     /// `fail with reason`
     Fail,
+    /// `graph:` and its nodes
+    Graph,
+    /// `node name needs other:` inside a `graph`
+    Node,
+    /// `saga name:`
+    Saga,
+    /// `compensate step:` inside a `saga`
+    Compensate,
+    /// `whenever x in batches, buffering N, drop oldest:`
+    Whenever,
+    /// `justify with (rules):`
+    Justify,
 }
 
 impl Kind {
@@ -76,6 +90,12 @@ impl Kind {
             Self::Act => "act",
             Self::GiveBack => "give",
             Self::Fail => "fail",
+            Self::Graph => "graph",
+            Self::Node => "node",
+            Self::Saga => "saga",
+            Self::Compensate => "compensate",
+            Self::Whenever => "whenever",
+            Self::Justify => "justify",
         }
     }
 }
@@ -389,7 +409,7 @@ const fn form(written: &'static str, means: &'static str) -> Form {
 const IF_ELSE_EXAMPLE: &str = "flow route(code: u16) -> u8:\n    if code < 400:\n        give back 0\n    else if code < 500:\n        give back 1\n    else:\n        give back 2\n";
 
 /// Every word, in the order the documentation lists them.
-pub const LEXICON: [Word; 15] = [
+pub const LEXICON: [Word; 21] = [
     Word {
         kind: Kind::Flow,
         position: Position::Flow,
@@ -710,6 +730,12 @@ pub const LEXICON: [Word; 15] = [
         )],
         example: "flow check(ready: bool):\n    if !ready:\n        fail with \"not ready\"\n",
     },
+    vocab::GRAPH,
+    vocab::NODE,
+    vocab::SAGA,
+    vocab::COMPENSATE,
+    vocab::WHENEVER,
+    vocab::JUSTIFY,
 ];
 
 /// The row `token` names, when it is a word.
@@ -733,23 +759,24 @@ pub(crate) fn kind_of(line: &Line) -> Option<Kind> {
 }
 
 /// The block words, as the refusal for an unknown block lists them: in lexicon
-/// order, `else` written with the `if` it belongs to, `let` in the form that
-/// opens a block, and the last one after an "or".
+/// order, `else` written with the `if` it belongs to, `node` and `compensate`
+/// left to the `graph` and `saga` they stand in, and `let`, in the form that
+/// opens a block, last after an "or".
 pub(crate) fn block_words() -> String {
     let mut words: Vec<String> = LEXICON
         .iter()
         .filter(|row| row.position == Position::Block)
         .filter_map(|row| match row.kind {
-            Kind::Else => None,
+            Kind::Else | Kind::Node | Kind::Compensate | Kind::Let => None,
             Kind::If => Some(format!(
                 "`{}`/`{}`",
                 Kind::If.spelling(),
                 Kind::Else.spelling()
             )),
-            Kind::Let => Some(format!("`{} x = <block>:`", Kind::Let.spelling())),
             kind => Some(format!("`{}`", kind.spelling())),
         })
         .collect();
+    words.push(format!("`{} x = <block>:`", Kind::Let.spelling()));
     match words.pop() {
         Some(last) if !words.is_empty() => format!("{}, or {last}", words.join(", ")),
         Some(last) => last,

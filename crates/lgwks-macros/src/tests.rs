@@ -29,7 +29,7 @@ pub(crate) fn expand(source: &str) -> Result<String, String> {
 ///
 /// A word's guarantee may cite a case here by its name (`lexicon::Evidence`),
 /// which is why the table is visible to the crate.
-pub(crate) const REFUSALS: [(&str, &str, &str); 37] = [
+pub(crate) const REFUSALS: [(&str, &str, &str); 43] = [
     (
         "unwrap by path",
         "flow f(x: Option<u8>):\n    let n = Option::unwrap(x)\n",
@@ -163,7 +163,7 @@ pub(crate) const REFUSALS: [(&str, &str, &str); 37] = [
     ),
     (
         "machine path",
-        "flow f():\n    let p = \"/Users/me/data.csv\"\n",
+        "flow f():\n    let p = \"/opt/me/data.csv\"\n",
         "absolute path from one machine",
     ),
     (
@@ -193,8 +193,38 @@ pub(crate) const REFUSALS: [(&str, &str, &str); 37] = [
     ),
     (
         "unknown block",
-        "flow f():\n    whenever x:\n        1\n",
+        "flow f():\n    forever x:\n        1\n",
         "unknown block",
+    ),
+    (
+        "graph with a cycle",
+        "flow f():\n    graph:\n        node a needs b:\n            1\n        node b needs a:\n            2\n",
+        "the needs form a cycle through `a`",
+    ),
+    (
+        "node outside a graph",
+        "flow f():\n    node a:\n        1\n",
+        "write it under a `graph:` line",
+    ),
+    (
+        "compensate outside a saga",
+        "flow f():\n    step a:\n        1\n    compensate a:\n        2\n",
+        "write it directly in a `saga name:` body",
+    ),
+    (
+        "compensate an unknown step",
+        "flow f():\n    saga s:\n        step a:\n            1\n        compensate b:\n            2\n",
+        "the steps so far: `a`",
+    ),
+    (
+        "whenever with no policy",
+        "flow f(feed: &Feed):\n    whenever x in feed.next().await, buffering 4:\n        x\n",
+        "names what happens past its buffer",
+    ),
+    (
+        "justify with no rules",
+        "flow f():\n    justify:\n        1\n",
+        "`justify with (rules):`",
     ),
     (
         "else without if",
@@ -393,20 +423,67 @@ fn an_expansion_with_a_run_call_is_still_rust() -> Result<(), String> {
         .map_err(|error| format!("the expansion is not Rust ({error}): {expanded}"))
 }
 
+/// Each structured word expands to its one runtime call, its map entry and its
+/// trail site, and the whole expansion is still Rust.
+#[test]
+fn the_structured_words_expand_to_their_runtime_calls() -> Result<(), String> {
+    let source = "flow ship(repo: &Repo, feed: &Feed, rules: &Justify) -> usize:\n\
+                  \x20   let report = graph:\n\
+                  \x20       node build:\n\
+                  \x20           repo.build()\n\
+                  \x20       node test needs build:\n\
+                  \x20           repo.test()\n\
+                  \x20   let ticket = saga booking:\n\
+                  \x20       step charge:\n\
+                  \x20           repo.charge()\n\
+                  \x20       compensate charge:\n\
+                  \x20           repo.refund()\n\
+                  \x20   let seen = whenever tick in feed.next().await, buffering 8, drop newest:\n\
+                  \x20       tick.record()\n\
+                  \x20   let code = justify with (rules):\n\
+                  \x20       repo.call()\n\
+                  \x20   give back report.succeeded().len()\n";
+    let expanded = expand(source)?;
+    for fragment in [
+        ":: lgwks_bot :: script :: graph_at",
+        "GraphNode :: new (\"test\" , & [\"build\"]",
+        ":: lgwks_bot :: script :: compensated_at",
+        "lgwks_script_compensations . add (\"charge\"",
+        ":: lgwks_bot :: script :: stream_at",
+        "Overflow :: DropNewest",
+        "with_justification",
+        "StepKind :: Graph",
+        "StepKind :: Node",
+        "StepKind :: Saga",
+        "StepKind :: Compensate",
+        "StepKind :: Whenever",
+        "StepKind :: Justify",
+    ] {
+        assert!(
+            expanded.contains(fragment),
+            "missing {fragment:?} in {expanded}"
+        );
+    }
+    TokenStream::from_str(&expanded)
+        .map(|_| ())
+        .map_err(|error| format!("the expansion is not Rust ({error}): {expanded}"))
+}
+
 /// The unknown-block refusal lists the block words as the macro always has:
 /// moving the parser into `lgwks_ast` (#383) rendered the list from the
 /// lexicon, and the rendering must still read `if`/`else` as one choice and
 /// show `let` in the form that opens a block.
 #[test]
 fn an_unknown_block_lists_every_block_word_in_one_sentence() -> Result<(), String> {
-    let refusal = match expand("flow f():\n    whenever x:\n        1\n") {
-        Ok(expanded) => return Err(format!("`whenever:` is no block: {expanded}")),
+    let refusal = match expand("flow f():\n    forever x:\n        1\n") {
+        Ok(expanded) => return Err(format!("`forever:` is no block: {expanded}")),
         Err(refusal) => refusal,
     };
     assert_eq!(
         refusal,
         "unknown block; a line ending in `:` is one of `each`, `within`, `retry`, \
-         `together`, `step`, `for`, `if`/`else`, or `let x = <block>:`",
+         `together`, `step`, `for`, `if`/`else`, `graph`, `saga`, `whenever`, \
+         `justify`, or `let x = <block>:`",
     );
     Ok(())
 }

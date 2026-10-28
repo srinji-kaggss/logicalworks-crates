@@ -1,4 +1,6 @@
 //! The blocks: `if`, `each`, `within`, `retry`, `step`, `together`, `for`.
+//! The structured words, `graph`, `saga`, `whenever` and `justify`, are read
+//! in `vocab`.
 
 use lgwks_deps::proc_macro2::{Spacing, TokenStream, TokenTree};
 
@@ -63,6 +65,7 @@ pub(super) fn if_chain(
     let branch_place = Place {
         nested: place.nested,
         wants_value: wants_value && has_else,
+        saga: false,
     };
     let mut shapes = Vec::new();
     let mut branches = Vec::new();
@@ -413,6 +416,7 @@ pub(super) fn for_loop(
         Place {
             nested: place.nested,
             wants_value: false,
+            saga: false,
         },
     )?;
     run_shapes.extend(inner);
@@ -443,6 +447,7 @@ fn nested_body(children: &[Node]) -> Result<(Block, Vec<StepShape>)> {
         Place {
             nested: true,
             wants_value: true,
+            saga: false,
         },
     )
 }
