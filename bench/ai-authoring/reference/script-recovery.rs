@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ai_task_support::recovery::{Ledger, World};
+use ai_task_support::recovery::World;
 use lgwks_bot::effect::RunId;
 use lgwks_bot::script::Scope;
 use lgwks_bot::task::{Disposition, Host, task};

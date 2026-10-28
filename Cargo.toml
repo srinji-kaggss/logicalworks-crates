@@ -20,7 +20,7 @@ resolver = "2"
 # ─────────────────────────────────────────────────────────────────────────────
 [workspace.dependencies]
 lgwks_std = { version = "3.2.1", path = "crates/lgwks-std" }
-lgwks_bot = { version = "6.0.0", path = "crates/lgwks-bot" }
+# No `lgwks_bot` entry: no member depends on it, and cargo warns on an unused one.
 lgwks_ast = { version = "4.0.0", path = "crates/lgwks-ast" }
 lgwks_macros = { version = "1.2.0", path = "crates/lgwks-macros" }
 # The storefront has no default feature; dependents opt into storefront features

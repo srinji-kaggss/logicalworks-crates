@@ -218,25 +218,31 @@ fn answer(
     let path = &fixture_paths()[index % FIXTURES];
     let text = &fixture_texts()[index % FIXTURES];
     let verdict = evidence.verdict(text, text);
-    let refusal = match verdict.as_ref() {
-        Ok(inner) => inner
-            .refusals()
-            .first()
-            .map_or_else(String::new, |outcome| {
-                outcome
-                    .reason()
-                    .map_or_else(String::new, ToString::to_string)
-            }),
-        Err(reason) => reason.to_string(),
+    // The first refusal's reason, the score's bits and acceptance are each a
+    // reading of the verdict; an empty reason and zero bits are what an answer
+    // with none of them reports, matched case by case.
+    let (refusal, score_bits, accepted) = match verdict.as_ref() {
+        Ok(inner) => {
+            let reason = match inner
+                .refusals()
+                .first()
+                .and_then(|outcome| outcome.reason())
+            {
+                Some(reason) => reason.to_string(),
+                None => String::new(),
+            };
+            let bits = match inner.score() {
+                Some(score) => score.to_bits(),
+                None => 0,
+            };
+            (reason, bits, inner.is_accepted())
+        }
+        Err(reason) => (reason.to_string(), 0, false),
     };
     CallerAnswer {
         matched: pattern.is_match_with(path, scratch),
-        score_bits: verdict
-            .as_ref()
-            .ok()
-            .and_then(|inner| inner.score())
-            .map_or(0, f64::to_bits),
-        accepted: verdict.as_ref().is_ok_and(|inner| inner.is_accepted()),
+        score_bits,
+        accepted,
         refusal,
         delay_nanos: retry
             .delay(
@@ -422,13 +428,13 @@ fn one_shared_matcher_evidence_policy_and_retry_policy_serve_every_tier()
             0,
             "tier {tier}: the downstream run must diverge nowhere:\n{stdout}"
         );
-        // The report is a word and the tier is an index, so the comparison is
-        // guarded by the one conversion between them rather than made through a
-        // substituted value.
+        // The report is a word and the tier is an index; the one conversion
+        // between them is propagated, never replaced by a substituted value.
         let reached = measurement(&stdout, &format!("tier{tier}-reached"));
-        assert!(
-            u64::try_from(tier).is_ok_and(|requested| reached == requested),
-            "tier {tier}: the host must reach every requested caller, reported {reached}:\n{stdout}"
+        let requested = u64::try_from(tier)?;
+        assert_eq!(
+            reached, requested,
+            "tier {tier}: the host must reach every requested caller:\n{stdout}"
         );
         let mut previous = 0_u64;
         for field in ["p50", "p95", "p99"] {
@@ -666,14 +672,12 @@ fn nanos_of(elapsed: std::time::Duration) -> u64 {
 }
 
 fn peak_rss_bytes() -> Option<u64> {
-    if let Some(statm) = std::fs::read_to_string("/proc/self/statm").ok() {
-        if let Some(pages) = statm.split_whitespace().nth(1) {
-            if let Some(pages) = pages.parse::<u64>().ok() {
-                if let Some(bytes) = pages.checked_mul(4096) {
-                    return Some(bytes);
-                }
-            }
-        }
+    if let Ok(statm) = std::fs::read_to_string("/proc/self/statm")
+        && let Some(pages) = statm.split_whitespace().nth(1)
+        && let Ok(pages) = pages.parse::<u64>()
+        && let Some(bytes) = pages.checked_mul(4096)
+    {
+        return Some(bytes);
     }
     let pid = std::process::id().to_string();
     let output = std::process::Command::new("ps")
@@ -734,13 +738,12 @@ fn answer(
         score_bits: verdict.as_ref().ok().and_then(|inner| inner.score()).map_or(0, f64::to_bits),
         accepted: verdict.as_ref().is_ok_and(|inner| inner.is_accepted()),
         refusal,
-        delay_nanos: u128::from(
-            retry.delay(
+        delay_nanos: retry
+            .delay(
                 ATTEMPT_WINDOW[index.rem_euclid(ATTEMPT_WINDOW.len())],
                 word_of(index),
             )
             .as_nanos(),
-        ),
     }
 }
 

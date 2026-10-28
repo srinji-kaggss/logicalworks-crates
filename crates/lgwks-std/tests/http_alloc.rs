@@ -539,7 +539,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let listener = std::sync::Arc::new(TcpListener::bind("127.0.0.1:0")?);
         let port = listener.local_addr()?.port();
         let reply = reply_for(64, "");
-        let pool = start_pool(std::sync::Arc::clone(&listener), reply, level.min(16).max(1));
+        let pool = start_pool(std::sync::Arc::clone(&listener), reply, level.clamp(1, 16));
         let url = format!("http://127.0.0.1:{port}/");
         let options = Options::default().max_body_bytes(64);
         let errors = AtomicUsize::new(0);
