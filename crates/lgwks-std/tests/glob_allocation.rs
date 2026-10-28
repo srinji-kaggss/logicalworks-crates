@@ -153,30 +153,30 @@ fn main() {
     // The first match warms the scratch's scalar index and both rolling rows.
     counted("first-match", || {
         if let Some(pattern) = six.as_ref() {
-            pattern.is_match_with("a/x/b7z", &mut scratch);
+            std::hint::black_box(pattern.is_match_with("a/x/b7z", &mut scratch));
         }
     });
     counted("warm-match", || {
         if let Some(pattern) = six.as_ref() {
-            pattern.is_match_with("a/y/b7q", &mut scratch);
+            std::hint::black_box(pattern.is_match_with("a/y/b7q", &mut scratch));
         }
     });
     // A longer path reallocates the scratch: one resize per buffer.
     counted("warm-match-longer", || {
         if let Some(pattern) = six.as_ref() {
-            pattern.is_match_with("a/x/y/b7z/deep", &mut scratch);
+            std::hint::black_box(pattern.is_match_with("a/x/y/b7z/deep", &mut scratch));
         }
     });
     // Back at the warm size, the retained capacity serves it for free.
     counted("warm-match-same-length", || {
         if let Some(pattern) = six.as_ref() {
-            pattern.is_match_with("a/x/b7z", &mut scratch);
+            std::hint::black_box(pattern.is_match_with("a/x/b7z", &mut scratch));
         }
     });
     // The twelve-token pattern reuses the same scratch.
     counted("warm-match-12-token", || {
         if let Some(pattern) = twelve.as_ref() {
-            pattern.is_match_with("a/x/b7z/a/y/b7q", &mut scratch);
+            std::hint::black_box(pattern.is_match_with("a/x/b7z/a/y/b7q", &mut scratch));
         }
     });
 

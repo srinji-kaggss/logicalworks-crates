@@ -1411,7 +1411,11 @@ jobs:
   # The step carries the lane's command text verbatim, so `check-gate-parity`
   # compares them: the nightly is pinned in the lane table, not in
   # `rust-toolchain.toml`, and `rust-src` is installed up front because
-  # `cargo miri` otherwise stops to ask before adding it.
+  # `cargo miri` otherwise stops to ask before adding it. Each target's sysroot
+  # is built first by `cargo miri setup` with warnings allowed: it is the
+  # toolchain's own `sysroot` package, and the workflow's warnings deny made
+  # its unused-dependency warning fail the job (run 40719181967). The tests
+  # that follow run with the deny on lgwks_std.
   #
   # Measured cold in the repository's Linux container: the install 12 s, the
   # darwin seam 33 s (7 tests), the Windows seam 30 s (10 tests), 71 s for the
@@ -1425,5 +1429,7 @@ jobs:
       - name: Prove the process unsafe seams under Miri
         run: |
           rustup toolchain install nightly-2026-10-01 --profile minimal --component miri --component rust-src && \
+          CARGO_BUILD_WARNINGS=warn cargo +nightly-2026-10-01 miri setup --target aarch64-apple-darwin && \
+          CARGO_BUILD_WARNINGS=warn cargo +nightly-2026-10-01 miri setup --target x86_64-pc-windows-msvc && \
           CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --no-default-features --features process --locked --lib --target aarch64-apple-darwin process::darwin::tests && \
           CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --no-default-features --features process --locked --lib --target x86_64-pc-windows-msvc process::windows::tests
