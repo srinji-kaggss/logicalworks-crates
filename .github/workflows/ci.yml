@@ -460,7 +460,7 @@ jobs:
           # INV-BOT-156) under the run's process-table storm — the grace is
           # calibrated for loaded, not oversubscribed, hosts.
           test-share: "8"
-          build-share: "3"
+          build-share: "6" # 3 compiled an edited lgwks_bot for 127 s at 2.8 of 3 cores; cancelled at 301 s (run 40734828832)
           # The other half of the critical path (296 s on run 39021102172).
           defer: "0"
       - name: Run lgwks-bot async runner tests
