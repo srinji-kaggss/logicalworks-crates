@@ -141,7 +141,9 @@ pub struct GatedIdentifiedSpawn {
     task: TaskId,
     /// The group leader's identity, read while the payload waited.
     leader: lgwks_std::process::ProcessIdentity,
-    /// The leader's pid, signalled on release.
+    /// The leader's pid, signalled on release. Unix only: the release that
+    /// reads it, and the spawn that sets it, exist only there.
+    #[cfg(unix)]
     pid: i32,
     /// Whether the payload was released to run.
     released: bool,

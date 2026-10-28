@@ -365,7 +365,8 @@ impl ProcessSpec {
     /// `Some` carries a clone of the piped bytes — possibly empty, which the
     /// driver writes as an immediate close — so the driver owns what it writes
     /// and the spec stays borrowed. Crate-internal: the only reader is the
-    /// supervisor's run path.
+    /// supervisor's run path, which feeds standard input on Unix only.
+    #[cfg(unix)]
     pub(crate) fn stdin_feed(&self) -> Option<Vec<u8>> {
         match self.stdin {
             StdioPolicy::Piped(ref input) => Some(input.clone()),
