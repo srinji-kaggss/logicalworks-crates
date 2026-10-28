@@ -5,10 +5,13 @@
 //!     --example measure_overhead -- [runs]
 //! ```
 //!
-//! Four lines are printed through the shared instrument every other measurement
+//! Seven lines are printed through the shared instrument every other measurement
 //! harness in this crate uses (`support/measure.rs`), so the numbers here and
 //! the numbers `resume_cost`, `tail_cost` and `poll_deadline_cost` print mean
 //! the same thing: `host_run` is one `Host::run` of an immediately-ready body;
+//! `block_on`, `host_block_on` and `estate_run_blocking` are the synchronous
+//! doors ADR 0006 R2 moved onto the process driver, each called from a plain
+//! thread;
 //! `script_line` is what one line of a `script!` flow costs the runtime, in
 //! nanoseconds (a run of [`lines`] divided by the lines it ran: a `for` item, a
 //! `step`, a `within` and a `retry` per pass, each succeeding at once, so the
@@ -31,6 +34,7 @@ use std::num::NonZeroUsize;
 use std::time::Instant;
 
 use lgwks_bot::domain::sys::Process;
+use lgwks_bot::rt::estate::Estate;
 use lgwks_bot::rt::process::ProcessSpec;
 use lgwks_bot::script::{FlowError, Scope, Tenant};
 use lgwks_bot::task::{Host, task};
@@ -137,6 +141,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     report("host_run", Unit::Micros, host_samples)?;
+
+    // The synchronous doors ADR 0006 R2 moved onto the process driver: one
+    // `block_on` of a ready future, one `Host::block_on` and one in-process
+    // `Estate::run_blocking` of the ready task, each from a plain thread.
+    let mut block_on_samples = Vec::with_capacity(runs);
+    for input in 0..run_count {
+        let started = Instant::now();
+        let answered = lgwks_bot::block_on(async move { input });
+        block_on_samples.push(started.elapsed().as_micros());
+        assert_eq!(
+            answered, input,
+            "every measured block_on returned its input"
+        );
+    }
+    report("block_on", Unit::Micros, block_on_samples)?;
+    let mut host_block_samples = Vec::with_capacity(runs);
+    for input in 0..run_count {
+        let started = Instant::now();
+        let run = host.block_on(&ready, input)?;
+        host_block_samples.push(started.elapsed().as_micros());
+        assert_eq!(
+            run.output().copied(),
+            Some(input),
+            "every measured run returned its input"
+        );
+    }
+    report("host_block_on", Unit::Micros, host_block_samples)?;
+    let estate = Estate::in_process("analysis")?;
+    let mut estate_samples = Vec::with_capacity(runs);
+    for input in 0..run_count {
+        let started = Instant::now();
+        let run = estate.run_blocking(&ready, input)?;
+        estate_samples.push(started.elapsed().as_micros());
+        assert_eq!(
+            run.output().copied(),
+            Some(input),
+            "every measured run returned its input"
+        );
+    }
+    report("estate_run_blocking", Unit::Micros, estate_samples)?;
 
     // One script line: a run of `lines` on a fresh root, per line it entered.
     let tenant = Tenant::new("overhead")?;
