@@ -1429,7 +1429,7 @@ jobs:
       - name: Prove the process unsafe seams under Miri
         run: |
           rustup toolchain install nightly-2026-10-01 --profile minimal --component miri --component rust-src && \
-          CARGO_BUILD_WARNINGS=warn cargo +nightly-2026-10-01 miri setup --target aarch64-apple-darwin && \
-          CARGO_BUILD_WARNINGS=warn cargo +nightly-2026-10-01 miri setup --target x86_64-pc-windows-msvc && \
+          CARGO_BUILD_WARNINGS=warn CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" cargo +nightly-2026-10-01 miri setup --target aarch64-apple-darwin && \
+          CARGO_BUILD_WARNINGS=warn CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" cargo +nightly-2026-10-01 miri setup --target x86_64-pc-windows-msvc && \
           CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --no-default-features --features process --locked --lib --target aarch64-apple-darwin process::darwin::tests && \
           CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER="" MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly-2026-10-01 miri test -p lgwks_std --no-default-features --features process --locked --lib --target x86_64-pc-windows-msvc process::windows::tests
