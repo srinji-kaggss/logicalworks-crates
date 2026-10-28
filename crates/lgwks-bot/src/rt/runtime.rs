@@ -1,15 +1,24 @@
-//! The orchestration runtime, explicitly owned.
+//! The orchestration runtime: one process driver, and runtimes a caller owns.
 //!
-//! `lgwks_bot` is the async runtime its callers enter: a [`Runtime`] is
-//! constructed, owned, and dropped by its caller, and every task runs on a
-//! runtime the caller can name. There is no global reactor. [`Handle`] is the
-//! cloneable capability to place work on a runtime that is owned elsewhere,
-//! and the free [`block_on`] is the current-thread one-off for synchronous code
-//! with no runtime to name.
+//! ADR 0006 decision 2: a process holds one tokio runtime, owned by the driver.
+//! [`driver`] builds it on first use and hands out its [`Handle`]; the host's
+//! `block_on`, the estate's supervised tiers and the free [`block_on`] all run
+//! on it, so none of them builds a runtime of its own. Every multi-thread
+//! runtime is its own worker pool, I/O driver and timer wheel, and several of
+//! them in one process compete for the same cores. The driver lives for the
+//! process: dropping a host or an estate cancels and aborts that owner's work,
+//! and leaves the driver to the others.
+//!
+//! A caller that wants a runtime of its own, with its own shutdown, still builds
+//! a [`Runtime`] and owns it; [`Handle`] is the cloneable capability to place
+//! work on a runtime owned elsewhere.
 
 use std::future::Future;
 use std::io;
 use std::num::NonZeroUsize;
+use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Maximum number of native worker threads accepted by [`Builder`].
@@ -192,8 +201,43 @@ impl Builder {
             builder.thread_stack_size(bytes.get());
         }
         builder.enable_all();
+        #[cfg(test)]
+        BUILT.fetch_add(1, Ordering::Relaxed);
         builder.build().map(|inner| Runtime { inner })
     }
+}
+
+/// Runtimes [`Builder::build`] has made in this test process, so a test can
+/// count them (`one_process_holds_one_driver`).
+#[cfg(test)]
+pub(crate) static BUILT: AtomicUsize = AtomicUsize::new(0);
+
+/// The process driver, built on first use by [`driver`] and never dropped.
+static DRIVER: Mutex<Option<Runtime>> = Mutex::new(None);
+
+/// The handle of the one process driver, building it on first use.
+///
+/// Built with [`Builder`]'s defaults: the discovered worker count, named
+/// `lgwks-bot`. The lock is held only while the slot is read or filled, never
+/// while work runs, and a poisoned lock is recovered because a [`Runtime`] has
+/// no half-built state a panic could leave behind.
+///
+/// # Errors
+///
+/// The OS refusing the driver's worker threads or I/O resources. Nothing is
+/// stored then, so the next call tries again.
+pub(crate) fn driver() -> io::Result<Handle> {
+    let mut slot = match DRIVER.lock() {
+        Ok(slot) => slot,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(runtime) = slot.as_ref() {
+        return Ok(runtime.handle());
+    }
+    let runtime = Builder::new().build()?;
+    let handle = runtime.handle();
+    *slot = Some(runtime);
+    Ok(handle)
 }
 
 /// The native worker count discovered from the OS, or `None` when the platform
@@ -262,21 +306,6 @@ impl Runtime {
     pub fn shutdown_timeout(self, timeout: Duration) {
         self.inner.shutdown_timeout(timeout);
     }
-
-    /// Shut the runtime down without waiting for anything to finish.
-    ///
-    /// The async-safe counterpart to [`Runtime::shutdown_timeout`]: in-flight work is dropped
-    /// rather than joined, so calling this from inside async never parks the calling thread —
-    /// including from the shutdown path of an owner the runtime would otherwise outlive. A
-    /// blocking task already executing keeps its thread; it is detached from the shutdown, not
-    /// aborted by it.
-    ///
-    /// Crate-private: its callers are the `script` tier's owners of a runtime (`task::Host` and
-    /// `rt::estate`), and a caller outside the crate has [`Runtime::shutdown_timeout`].
-    #[cfg(feature = "script")]
-    pub(crate) fn shutdown_background(self) {
-        self.inner.shutdown_background();
-    }
 }
 
 /// A cloneable capability to run work on a [`Runtime`] owned elsewhere.
@@ -329,32 +358,78 @@ impl crate::ecs::EcsBot {
     }
 }
 
-/// Run one future to completion on a private current-thread runtime.
+/// Run one future to completion on the process [`driver`], blocking the calling
+/// thread.
 ///
-/// This is the one-off entry for synchronous code that has no runtime to name:
-/// it builds and tears it down per call, so code that makes repeated async
-/// calls must hold a [`Runtime`] instead. Current-thread, so a borrowed or
-/// non-`Send` one-off drives where a multi-thread driver would refuse it.
-/// Panics if called from within an async context, and panics if the OS refuses
-/// the runtime's driver resources, a condition under which no async work could
-/// proceed.
+/// This is the one-off entry for synchronous code that has no runtime to
+/// name; it builds nothing after the driver's first use. The future itself is
+/// polled on the calling thread, so a borrowed or non-`Send` one-off drives;
+/// what it spawns runs on the driver's workers. Panics if called from within an
+/// async context, and panics if the OS refuses the driver's resources, a
+/// condition under which no async work could proceed.
 pub fn block_on<F: Future>(future: F) -> F::Output {
-    let mut builder = lgwks_deps::tokio::runtime::Builder::new_current_thread();
-    builder.enable_all();
-    let runtime = match builder.build() {
-        Ok(runtime) => runtime,
+    match driver() {
+        Ok(handle) => handle.block_on(future),
         // The contract is that this reports on the calling thread rather than
         // returning an error, and there is no error channel in `F::Output` to
         // report through. `resume_unwind` is the crate's form for a documented,
         // unavoidable panic (`lgwks_std::task::JoinHandle` uses it for the same
         // reason): the caller is a synchronous frame with nowhere to propagate
         // to, and the alternative (hanging on a future no driver can poll) is
-        // strictly worse. A current-thread runtime needs only the driver's
-        // resources, so an OS refusal means every timer and IO operation in
-        // `future` would be unrunnable anyway.
+        // strictly worse.
         Err(error) => std::panic::resume_unwind(Box::new(format!(
-            "lgwks_bot::rt: the OS refused a current-thread runtime: {error}"
+            "lgwks_bot::rt: the OS refused the process driver: {error}"
         ))),
-    };
-    runtime.block_on(future)
+    }
 }
+
+/// ADR 0006 R2 falsifier: a process that builds an estate, runs a host and blocks on a future
+/// holds exactly one runtime.
+#[cfg(all(test, feature = "script"))]
+mod one_driver_tests {
+    use std::sync::atomic::Ordering;
+
+    use super::{BUILT, block_on, driver};
+    use crate::rt::estate::Estate;
+    use crate::task::task;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn one_process_holds_one_driver() -> TestResult {
+        let before = BUILT.load(Ordering::Relaxed);
+        let probe = task("one-driver", |_scope, input: u64| async move {
+            Ok(input.saturating_add(1))
+        })?;
+        let mut supervised = Estate::supervised("acme", 4)?;
+        let in_process = Estate::in_process("globex")?;
+        let first = supervised.run_blocking(&probe, 1)?;
+        let second = in_process.run_blocking(&probe, 2)?;
+        let third = in_process.host().block_on(&probe, 3)?;
+        let fourth = block_on(async { 4_u64 });
+        let handle = supervised
+            .handle()
+            .ok_or("a supervised estate carries the driver")?;
+        let fifth = handle.block_on(async { 5_u64 });
+        let drained = supervised.shutdown_blocking()?;
+        let after_shutdown = driver()?.block_on(async { 6_u64 });
+        assert_eq!(
+            (first.output(), second.output(), third.output()),
+            (Some(&2), Some(&3), Some(&4)),
+            "every door ran its run"
+        );
+        assert_eq!((fourth, fifth, after_shutdown), (4, 5, 6));
+        assert_eq!(drained.runs_admitted(), 1, "the estate counted its own run");
+        // At most one: a runner that shares the process across tests may have built the
+        // driver before this test began, and then this one builds none.
+        assert!(
+            BUILT.load(Ordering::Relaxed).saturating_sub(before) <= 1,
+            "two estates, a host and two block_on calls built one runtime"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "script"))]
+#[path = "sim_one_driver.rs"]
+mod sim_one_driver;

@@ -1,8 +1,8 @@
 //! The installed owner: `Host`, the state its handles share, the plan one
 //! call executes, and the doors that build, read and run through it.
 
+use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use lgwks_std::hash::{Digest, Hasher};
@@ -11,7 +11,6 @@ use crate::effect::RunId;
 use crate::gate::GrantSet;
 use crate::registry::DomainRegistry;
 use crate::rt::clock::Clock;
-use crate::rt::runtime::Runtime;
 use crate::rt::sync::{CancellationToken, Semaphore};
 use crate::script::{DEFAULT_TRAIL_STEPS, Durable, FlowError, Policy, Scope, Tenant};
 
@@ -46,7 +45,8 @@ use super::{
 #[derive(Clone)]
 pub struct Host {
     /// Everything the handles of one host share: the budget, the counters, the
-    /// tenant, the stop token, the ceilings, and the lazily built reactor.
+    /// tenant, the stop token and the ceilings. The runtime is the process
+    /// driver's, never the host's.
     pub(super) inner: Arc<Installation>,
 }
 
@@ -124,33 +124,6 @@ pub(super) struct Installation {
     pub(super) repair_attempts: u64,
     /// The most root spend one run may be charged before it is refused.
     pub(super) repair_spend: u64,
-    /// The runtime [`Host::block_on`] drives on, built once on first use and
-    /// owned for the host's lifetime: a runtime whose last owner drops it shuts
-    /// down and drops every task still running on it, so holding it here is what
-    /// lets a second [`Host::block_on`] drive work on the same reactor. Each call
-    /// takes a fresh handle from it rather than a stored copy, so no handle can
-    /// outlive the runtime it points at.
-    pub(super) reactor: Mutex<Option<Runtime>>,
-}
-
-impl Drop for Installation {
-    /// End the lazily built reactor without parking the dropping thread.
-    ///
-    /// The last clone of a host can drop anywhere, including inside async code, and dropping a
-    /// multi-thread runtime there panics ("Cannot drop a runtime in a context where blocking is
-    /// not allowed"). Terminating it in the background never parks the thread, so a host that
-    /// ran through [`Host::block_on`] can be dropped from any context. In-flight work on the
-    /// reactor is dropped, exactly as a plain drop would drop it; only the join is skipped.
-    /// Poisoning recovers, as the slot's other readers do: a runtime's termination is infallible.
-    fn drop(&mut self) {
-        let slot = match self.reactor.get_mut() {
-            Ok(slot) => slot,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if let Some(runtime) = slot.take() {
-            runtime.shutdown_background();
-        }
-    }
 }
 
 /// What one call to [`Host::execute`] is asking for.

@@ -1,17 +1,18 @@
-//! The assembled estate: one host, and above the in-process tier one owned runtime and supervisor.
+//! The assembled estate: one host, and above the in-process tier a supervisor on the process
+//! driver.
 //!
-//! [`Runtime`](crate::rt::runtime::Runtime) drives, [`Supervisor`](crate::rt::supervise::Supervisor)
-//! owns concurrent work under a ceiling, and [`Host`](crate::task::Host) admits and runs
-//! tenant-scoped tasks. Each already owns its piece; this module owns the assembly, so a caller
-//! declares a tier once instead of wiring three builders and risking their ceilings and shutdown
-//! order disagreeing.
+//! The process driver (`rt::runtime::driver`, ADR 0006 decision 2) drives,
+//! [`Supervisor`](crate::rt::supervise::Supervisor) owns concurrent work under a ceiling, and
+//! [`Host`](crate::task::Host) admits and runs tenant-scoped tasks. Each already owns its piece;
+//! this module owns the assembly, so a caller declares a tier once instead of wiring three builders
+//! and risking their ceilings and shutdown order disagreeing. No tier builds a runtime of its own.
 //!
 //! # Tiers
 //!
-//! - `Estate::in_process` is a [`Host`](crate::task::Host) alone: no runtime and no supervisor.
-//!   Runs go through the host's lazily built reactor, so a caller with no async surface still runs.
-//! - `Estate::supervised` adds the owned [`Runtime`](crate::rt::runtime::Runtime) and a
-//!   [`Supervisor`](crate::rt::supervise::Supervisor) with the caller's in-flight ceiling. The host
+//! - `Estate::in_process` is a [`Host`](crate::task::Host) alone: no supervisor. Runs go through
+//!   the process driver, so a caller with no async surface still runs.
+//! - `Estate::supervised` adds a [`Supervisor`](crate::rt::supervise::Supervisor) on the process
+//!   driver with the caller's in-flight ceiling. The host
 //!   admits at most that many top-level runs and the supervisor holds at most that many tasks: one
 //!   number declared once, enforced by two semaphores that are each built from it. A zero bound is
 //!   refused.
@@ -29,8 +30,8 @@
 //! # Running and stopping
 //!
 //! `run_task` awaits a run on whatever drives it, exactly like
-//! [`Host::run`](crate::task::Host::run); `run_blocking` drives it on the estate's own runtime
-//! when it has one and on the host's reactor otherwise, refusing with
+//! [`Host::run`](crate::task::Host::run); `run_blocking` drives it on the process driver,
+//! refusing with
 //! [`HostError`](crate::task::HostError) rather than deadlocking when a runtime already drives the
 //! thread. `cancel` stops every run under the host and every task under the supervisor; `shutdown`
 //! cancels first and then drains the supervisor to one terminal [`EstateReport`], while
@@ -38,8 +39,8 @@
 //! refusal inside a runtime leaves it whole for `shutdown` to finish.
 //!
 //! An estate dropped without either releases everything it owns without parking the dropping
-//! thread: the supervisor's tasks abort, then the runtime ends in the background, and the host
-//! ends its reactor the same way, so dropping inside async never panics and never leaks a worker.
+//! thread: the supervisor's tasks abort and the host's runs are cancelled, so dropping inside
+//! async never panics. The driver is the process's and stays up for every other owner on it.
 //! Draining stays the shutdowns' job.
 //!
 //! # Evidence
@@ -57,18 +58,17 @@ use core::fmt;
 use core::num::NonZeroUsize;
 
 use crate::journal::frame::SaturatingFrom;
-use crate::rt::runtime::{Handle, Runtime};
+use crate::rt::runtime::{Handle, driver};
 use crate::rt::supervise::{Stats, Supervisor};
 use crate::script::{FlowError, Scope};
 use crate::task::{Host, HostError, Report, RunStore, StoreError, Task};
 
 /// One assembled runtime for one tenant.
 ///
-/// The supervised tiers hold their supervisor and runtime together, so an estate cannot be built
-/// with one and not the other. The `Drop` impl releases them in order — the supervisor's owned
-/// tasks abort before the runtime they run on ends — and the host ends its own reactor when its
-/// last handle drops, so an estate dropped without `shutdown` leaves nothing running even inside
-/// async.
+/// The supervised tiers hold their supervisor and the driver's handle together, so an estate
+/// cannot be built with one and not the other. The `Drop` impl aborts the supervisor's owned
+/// tasks, so an estate dropped without `shutdown` leaves none of its work running even inside
+/// async; the process driver stays up for its other owners.
 pub struct Estate {
     /// The supervisor and the driver it runs on: absent on the in-process tier, and after a
     /// shutdown has drained them.
@@ -79,39 +79,32 @@ pub struct Estate {
     tier: &'static str,
 }
 
-/// What the supervised tiers add to the host: an owner of concurrent work and the runtime it runs
-/// on.
+/// What the supervised tiers add to the host: an owner of concurrent work, and the process driver
+/// it runs on (ADR 0006 decision 2: the estate builds no runtime of its own).
 struct Driven {
     /// The ceiling and owner of supervised work.
     supervisor: Supervisor,
-    /// The driver the supervised work and `run_blocking` run on.
-    runtime: Runtime,
+    /// The process driver the supervised work and `run_blocking` run on.
+    driver: Handle,
 }
 
 impl Driven {
-    /// A supervisor with ceiling `max_in_flight` on a fresh runtime.
+    /// A supervisor with ceiling `max_in_flight` on the process driver.
     ///
-    /// The runtime is the one thing in an estate that holds OS threads, so every constructor calls
-    /// this last: a refusal before it leaves nothing running.
+    /// The driver is built on its first use in the process, so every constructor calls this last:
+    /// a refusal before it starts no thread.
     fn new(max_in_flight: usize) -> Result<Self, EstateError> {
-        let runtime = Runtime::new().map_err(|cause| EstateError::Runtime { cause })?;
+        let driver = driver().map_err(|cause| EstateError::Runtime { cause })?;
         Ok(Self {
             supervisor: Supervisor::new(max_in_flight),
-            runtime,
+            driver,
         })
     }
 
-    /// Abort the supervisor's tasks, then end the runtime without waiting for it.
-    ///
-    /// A multi-thread runtime dropped inside async panics, so the runtime is ended in the
-    /// background; draining is the shutdowns' job and this only guarantees no leak.
+    /// Abort the supervisor's tasks. The driver is the process's and stays up for every other
+    /// owner on it; draining is the shutdowns' job and this only guarantees no leak.
     fn release(self) {
-        let Self {
-            supervisor,
-            runtime,
-        } = self;
-        drop(supervisor);
-        runtime.shutdown_background();
+        drop(self.supervisor);
     }
 }
 
@@ -339,12 +332,10 @@ fn make_private(_file: &std::path::Path) -> Result<(), EstateError> {
 }
 
 impl Drop for Estate {
-    /// Release the supervisor and the runtime without blocking, so an estate dropped inside async
-    /// still leaves no worker behind.
+    /// Release the supervisor without blocking, so an estate dropped inside async leaves none of
+    /// its tasks behind.
     ///
-    /// Draining is the shutdowns' job; this only guarantees no leak. A multi-thread runtime
-    /// dropped inside async panics, so without this every async drop would be one. The host's
-    /// reactor is ended by the host, after this runs, for the same reason.
+    /// Draining is the shutdowns' job; this only guarantees no leak.
     fn drop(&mut self) {
         if let Some(driven) = self.driven.take() {
             driven.release();
@@ -353,9 +344,9 @@ impl Drop for Estate {
 }
 
 impl Estate {
-    /// A host alone for `tenant`: no runtime, no supervisor, no store.
+    /// A host alone for `tenant`: no supervisor, no store.
     ///
-    /// Runs go through the host's lazily built reactor, so this tier runs anywhere the host does.
+    /// Runs go through the process driver, so this tier runs anywhere the host does.
     ///
     /// # Errors
     ///
@@ -372,7 +363,7 @@ impl Estate {
         })
     }
 
-    /// An owned runtime and a supervisor with ceiling `max_in_flight` around the host for `tenant`.
+    /// A supervisor on the process driver with ceiling `max_in_flight` around the host for `tenant`.
     ///
     /// The ceiling is declared once: the host admits at most `max_in_flight` top-level runs and
     /// the supervisor holds at most `max_in_flight` in flight.
@@ -404,7 +395,7 @@ impl Estate {
     /// # Errors
     ///
     /// As [`Estate::supervised`], plus [`EstateError::Store`] when the store cannot be opened or
-    /// replayed, or its name is held by another case. The runtime is built after the store, so a
+    /// replayed, or its name is held by another case. The driver is reached after the store, so a
     /// refused store returns this error inside async as it does outside it.
     #[cfg(feature = "ephemeral")]
     pub fn durable(
@@ -470,14 +461,14 @@ impl Estate {
         self.driven.as_mut().map(|driven| &mut driven.supervisor)
     }
 
-    /// A handle that drives futures on the estate's runtime, on the supervised tiers while the
+    /// A handle that drives futures on the process driver, on the supervised tiers while the
     /// estate is open.
     ///
     /// `Handle::block_on` blocks the calling thread and panics inside async code: it is for
     /// synchronous callers, as `run_blocking` is.
     #[must_use]
     pub fn handle(&self) -> Option<Handle> {
-        self.driven.as_ref().map(|driven| driven.runtime.handle())
+        self.driven.as_ref().map(|driven| driven.driver.clone())
     }
 
     /// The durable step-record store this estate installed, when it has one.
@@ -492,7 +483,7 @@ impl Estate {
     /// Await one run of `task` on `input`, exactly like [`Host::run`](crate::task::Host::run).
     ///
     /// The run is admitted by the host, so the shutdown report counts it on `runs_admitted`. It
-    /// needs a driver: await it on the estate's runtime, or drive it with `run_blocking`.
+    /// needs a driver: await it on the process driver, or drive it with `run_blocking`.
     pub async fn run_task<I, O, F, Fut>(&self, task: &Task<F>, input: I) -> Report<O>
     where
         F: Fn(Scope, I) -> Fut,
@@ -503,8 +494,7 @@ impl Estate {
 
     /// Drive one run of `task` on `input` to completion, blocking the calling thread.
     ///
-    /// The estate's own runtime drives when it has one; the host's lazily built reactor drives
-    /// otherwise.
+    /// The process driver drives it on every tier.
     ///
     /// # Errors
     ///
@@ -526,7 +516,7 @@ impl Estate {
             return refusal;
         }
         match self.driven.as_ref() {
-            Some(driven) => Ok(driven.runtime.block_on(self.host.run(task, input))),
+            Some(driven) => Ok(driven.driver.block_on(self.host.run(task, input))),
             None => self.host.block_on(task, input),
         }
     }
@@ -550,17 +540,7 @@ impl Estate {
     pub async fn shutdown(mut self) -> EstateReport {
         self.host.cancel();
         let supervised = match self.driven.take() {
-            Some(Driven {
-                supervisor,
-                runtime,
-            }) => {
-                let stats = supervisor.shutdown().await.stats();
-                // After the drain: the workers have nothing left to finish, and ending them here
-                // never parks this thread, so terminating inside async is safe where dropping
-                // would panic.
-                runtime.shutdown_background();
-                stats
-            }
+            Some(Driven { supervisor, .. }) => supervisor.shutdown().await.stats(),
             None => Stats::default(),
         };
         self.report(supervised)
@@ -568,7 +548,7 @@ impl Estate {
 
     /// Cancel, then drain to one terminal [`EstateReport`], blocking the calling thread.
     ///
-    /// The estate's own runtime drives the drain when it has one. A runtime already driving this
+    /// The process driver drives the drain. A runtime already driving this
     /// thread is refused rather than deadlocked, and the refusal changes nothing: the estate is
     /// still whole, so `shutdown` finishes the job. After a successful drain the estate is closed:
     /// the host is cancelled, `supervisor` and `handle` answer `None`, and a second call reports
@@ -586,16 +566,7 @@ impl Estate {
         }
         self.host.cancel();
         let supervised = match self.driven.take() {
-            Some(Driven {
-                supervisor,
-                runtime,
-            }) => {
-                let stats = runtime.block_on(supervisor.shutdown()).stats();
-                // After the drain: the workers have nothing left to finish, and the join is
-                // skipped so a blocking task that never returns cannot hold this call.
-                runtime.shutdown_background();
-                stats
-            }
+            Some(Driven { supervisor, driver }) => driver.block_on(supervisor.shutdown()).stats(),
             None => Stats::default(),
         };
         Ok(self.report(supervised))
