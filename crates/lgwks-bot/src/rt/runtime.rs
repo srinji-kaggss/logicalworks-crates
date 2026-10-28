@@ -1,7 +1,7 @@
 //! The orchestration runtime: one process driver, and runtimes a caller owns.
 //!
 //! ADR 0006 decision 2: a process holds one tokio runtime, owned by the driver.
-//! [`driver`] builds it on first use and hands out its [`Handle`]; the host's
+//! The crate-private `driver` builds it on first use and hands out its [`Handle`]; the host's
 //! `block_on`, the estate's supervised tiers and the free [`block_on`] all run
 //! on it, so none of them builds a runtime of its own. Every multi-thread
 //! runtime is its own worker pool, I/O driver and timer wheel, and several of
@@ -43,8 +43,8 @@ pub(crate) const DEFAULT_THREAD_NAME: &str = "lgwks-bot";
 /// Configures and builds the owned orchestration [`Runtime`].
 ///
 /// Native targets drive a multi-thread scheduler through the crate-owned
-/// engine, or the current-thread one a caller asks for with
-/// [`Builder::current_thread`]. WASM targets use the
+/// engine, or the current-thread one the crate's own tests ask for. WASM
+/// targets use the
 /// current-thread scheduler because WASM has no native worker-thread driver.
 /// Native defaults are discovered, never hardcoded: worker count follows
 /// [`std::thread::available_parallelism`] and the thread name is
@@ -255,8 +255,9 @@ std::thread_local! {
 
 /// Runtimes [`Builder::build`] has made on the calling thread, so a test can
 /// count the ones its own doors built (`one_process_holds_one_driver`) while
-/// other tests in a shared-process runner build theirs.
-#[cfg(test)]
+/// other tests in a shared-process runner build theirs. Both readers need the
+/// `script` feature, so a build without it leaves the counter unread.
+#[cfg(all(test, feature = "script"))]
 pub(crate) fn built_here() -> usize {
     BUILT.with(Cell::get)
 }
@@ -414,7 +415,7 @@ impl crate::ecs::EcsBot {
     }
 }
 
-/// Run one future to completion on the process [`driver`], blocking the calling
+/// Run one future to completion on the process driver, blocking the calling
 /// thread.
 ///
 /// This is the one-off entry for synchronous code that has no runtime to
