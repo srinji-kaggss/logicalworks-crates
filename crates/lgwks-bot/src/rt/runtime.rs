@@ -13,12 +13,12 @@
 //! a [`Runtime`] and owns it; [`Handle`] is the cloneable capability to place
 //! work on a runtime owned elsewhere.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::future::Future;
 use std::io;
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
-#[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Maximum number of native worker threads accepted by [`Builder`].
@@ -43,7 +43,8 @@ pub(crate) const DEFAULT_THREAD_NAME: &str = "lgwks-bot";
 /// Configures and builds the owned orchestration [`Runtime`].
 ///
 /// Native targets drive a multi-thread scheduler through the crate-owned
-/// engine. WASM targets use the
+/// engine, or the current-thread one a caller asks for with
+/// [`Builder::current_thread`]. WASM targets use the
 /// current-thread scheduler because WASM has no native worker-thread driver.
 /// Native defaults are discovered, never hardcoded: worker count follows
 /// [`std::thread::available_parallelism`] and the thread name is
@@ -66,6 +67,9 @@ pub struct Builder {
     /// Stack size in bytes for native workers, or `None` for the engine's default
     /// of 2 MiB. Ignored on WASM.
     thread_stack_size: Option<NonZeroUsize>,
+    /// Whether the runtime drives every task on the thread that calls
+    /// `block_on`, with no worker pool. Always so on WASM.
+    current_thread: bool,
 }
 
 impl Default for Builder {
@@ -80,6 +84,7 @@ impl Default for Builder {
             thread_name: String::from(DEFAULT_THREAD_NAME),
             max_blocking_threads: None,
             thread_stack_size: None,
+            current_thread: false,
         }
     }
 }
@@ -149,6 +154,24 @@ impl Builder {
         self
     }
 
+    /// Drive every task on the thread that calls [`Runtime::block_on`], with no
+    /// worker pool.
+    ///
+    /// The scheduler for the crate's tests whose tasks must interleave on one
+    /// thread, observing yielding in the order they created it. The process
+    /// driver every door shares stays multi-thread; this runtime is the
+    /// caller's own. An explicit [`Builder::worker_threads`] beside it is
+    /// refused when the runtime is built. WASM runtimes are current-thread
+    /// already, so there it changes nothing. Crate-private and test-only:
+    /// `script!` is the one supported interface (#526), so the builder's
+    /// public surface does not grow.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn current_thread(mut self) -> Self {
+        self.current_thread = true;
+        self
+    }
+
     /// Build the runtime.
     ///
     /// This allocates native worker threads immediately; a failure is the OS
@@ -165,10 +188,27 @@ impl Builder {
             return refusal;
         }
 
+        if self.current_thread && self.worker_threads.is_some() {
+            let refusal = Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "lgwks_bot: worker_threads is unsupported on a current-thread runtime",
+            ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build: returning an error to the caller");
+            return refusal;
+        }
+
         #[cfg(not(target_family = "wasm"))]
-        let workers = self.worker_threads.or_else(discover_workers);
+        let workers = if self.current_thread {
+            None
+        } else {
+            self.worker_threads.or_else(discover_workers)
+        };
         #[cfg(not(target_family = "wasm"))]
-        let mut builder = lgwks_deps::tokio::runtime::Builder::new_multi_thread();
+        let mut builder = if self.current_thread {
+            lgwks_deps::tokio::runtime::Builder::new_current_thread()
+        } else {
+            lgwks_deps::tokio::runtime::Builder::new_multi_thread()
+        };
         #[cfg(target_family = "wasm")]
         let mut builder = lgwks_deps::tokio::runtime::Builder::new_current_thread();
         #[cfg(not(target_family = "wasm"))]
@@ -202,15 +242,24 @@ impl Builder {
         }
         builder.enable_all();
         #[cfg(test)]
-        BUILT.fetch_add(1, Ordering::Relaxed);
+        BUILT.with(|built| built.set(built.get().saturating_add(1)));
         builder.build().map(|inner| Runtime { inner })
     }
 }
 
-/// Runtimes [`Builder::build`] has made in this test process, so a test can
-/// count them (`one_process_holds_one_driver`).
 #[cfg(test)]
-pub(crate) static BUILT: AtomicUsize = AtomicUsize::new(0);
+std::thread_local! {
+    /// Runtimes [`Builder::build`] has made on this thread.
+    static BUILT: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Runtimes [`Builder::build`] has made on the calling thread, so a test can
+/// count the ones its own doors built (`one_process_holds_one_driver`) while
+/// other tests in a shared-process runner build theirs.
+#[cfg(test)]
+pub(crate) fn built_here() -> usize {
+    BUILT.with(Cell::get)
+}
 
 /// The process driver, built on first use by [`driver`] and never dropped.
 static DRIVER: Mutex<Option<Runtime>> = Mutex::new(None);
@@ -387,9 +436,7 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 /// holds exactly one runtime.
 #[cfg(all(test, feature = "script"))]
 mod one_driver_tests {
-    use std::sync::atomic::Ordering;
-
-    use super::{BUILT, block_on, driver};
+    use super::{block_on, built_here, driver};
     use crate::rt::estate::Estate;
     use crate::task::task;
 
@@ -397,7 +444,7 @@ mod one_driver_tests {
 
     #[test]
     fn one_process_holds_one_driver() -> TestResult {
-        let before = BUILT.load(Ordering::Relaxed);
+        let before = built_here();
         let probe = task("one-driver", |_scope, input: u64| async move {
             Ok(input.saturating_add(1))
         })?;
@@ -423,7 +470,7 @@ mod one_driver_tests {
         // At most one: a runner that shares the process across tests may have built the
         // driver before this test began, and then this one builds none.
         assert!(
-            BUILT.load(Ordering::Relaxed).saturating_sub(before) <= 1,
+            built_here().saturating_sub(before) <= 1,
             "two estates, a host and two block_on calls built one runtime"
         );
         Ok(())
@@ -433,3 +480,51 @@ mod one_driver_tests {
 #[cfg(all(test, feature = "script"))]
 #[path = "sim_one_driver.rs"]
 mod sim_one_driver;
+
+#[cfg(all(test, not(target_family = "wasm")))]
+#[path = "sim_current_thread.rs"]
+mod sim_current_thread;
+
+/// [`Builder::current_thread`]: the caller's own one-thread runtime, which the
+/// supervise tests build where tasks must interleave on one thread.
+#[cfg(all(test, not(target_family = "wasm")))]
+mod current_thread_tests {
+    use std::cell::Cell;
+    use std::io;
+    use std::num::NonZeroUsize;
+
+    use super::Builder;
+
+    std::thread_local! {
+        /// Set on the thread that blocks; a worker thread never sets it.
+        static CALLER: Cell<bool> = const { Cell::new(false) };
+    }
+
+    #[test]
+    fn a_current_thread_runtime_runs_what_it_spawns_on_the_calling_thread() -> io::Result<()> {
+        CALLER.with(|caller| caller.set(true));
+        let runtime = Builder::new().current_thread().build()?;
+        let spawned = runtime.block_on(async {
+            let mut owned = crate::rt::task::JoinSet::new();
+            owned.spawn(async { CALLER.with(Cell::get) });
+            owned.join_next().await
+        });
+        assert!(
+            matches!(spawned, Some(Ok(true))),
+            "a spawned task runs on the thread that blocks"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_current_thread_runtime_refuses_a_worker_count() {
+        let refused = Builder::new()
+            .current_thread()
+            .worker_threads(NonZeroUsize::new(2))
+            .build();
+        assert!(
+            matches!(refused, Err(ref error) if error.kind() == io::ErrorKind::InvalidInput),
+            "a worker count beside current_thread is refused, not ignored"
+        );
+    }
+}

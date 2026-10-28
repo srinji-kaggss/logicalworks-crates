@@ -3,9 +3,8 @@
 use super::super::repeat::repeat;
 use super::super::supervisor::Supervisor;
 use super::super::{Budget, Outcome};
-use super::{budget_of, settle, spawn_heartbeat, yield_until};
+use super::{block_on, budget_of, settle, spawn_heartbeat, yield_until};
 use crate::rt::cancel::CancellationToken;
-use crate::rt::runtime::block_on;
 use crate::rt::task::yield_now;
 use std::future::pending;
 use std::sync::Arc;

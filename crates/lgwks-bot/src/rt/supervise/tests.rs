@@ -13,8 +13,7 @@ use super::supervisor::Supervisor;
 use super::{Budget, TaskId};
 #[cfg(all(not(any(unix, windows)), feature = "process"))]
 use crate::rt::process::ProcessSpec;
-#[cfg(all(not(any(unix, windows)), feature = "process"))]
-use crate::rt::runtime::block_on;
+use crate::rt::runtime::Builder;
 use crate::rt::task::yield_now;
 #[cfg(all(unix, feature = "process"))]
 use lgwks_std::process::ContainmentMechanism;
@@ -434,6 +433,23 @@ fn test_lease() -> Option<Lease> {
     Some(Lease::plain(permit))
 }
 
+/// Run `future` on a current-thread runtime built for this call, so the test
+/// body and every task it spawns share one thread.
+///
+/// The helpers below observe executor sharing by yielding, which only means
+/// something on one thread: the process driver the free
+/// [`crate::rt::runtime::block_on`] uses is multi-thread (ADR 0006 R2), and
+/// on it a sibling runs in parallel rather than when the body yields. Panics,
+/// as the free one does, if the OS refuses the runtime.
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    match Builder::new().current_thread().build() {
+        Ok(runtime) => runtime.block_on(future),
+        Err(error) => std::panic::resume_unwind(Box::new(format!(
+            "supervise tests: the OS refused a current-thread runtime: {error}"
+        ))),
+    }
+}
+
 /// Drive the current task until nothing the supervisor started is still
 /// running.
 ///
@@ -534,7 +550,6 @@ mod tenancy;
 #[test]
 fn an_unsignalable_present_group_stays_pending_rather_than_failed() {
     use super::outcome::CleanupReceipt;
-    use crate::rt::runtime::block_on;
 
     // macOS/BSD report EPERM for a further killpg against a group whose
     // leader is an unreaped zombie. That is "the group is still there", not
@@ -559,7 +574,6 @@ fn an_unsignalable_present_group_stays_pending_rather_than_failed() {
 #[test]
 fn an_unexpected_signal_error_is_a_failed_cleanup() {
     use super::outcome::CleanupReceipt;
-    use crate::rt::runtime::block_on;
 
     let signaller = UnexpectedGroupSignaller;
     let observer = sequence(0);
@@ -588,7 +602,6 @@ fn an_unexpected_signal_error_is_a_failed_cleanup() {
 fn a_tenanted_admission_joins_a_bounded_backlog_and_keeps_the_set_at_the_ceiling()
 -> Result<(), Box<dyn std::error::Error>> {
     use super::REAP_PER_ADMISSION;
-    use crate::rt::runtime::block_on;
     use crate::rt::tenancy::TenancyPolicy;
     use crate::script::Tenant;
     use std::sync::atomic::AtomicUsize;

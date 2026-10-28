@@ -9,9 +9,9 @@ use super::super::owners::GroupSignaller;
 use super::super::repeat::truncate_panic_message;
 #[cfg(all(unix, feature = "process"))]
 use super::super::{CONTAINMENT_ROUNDS, EPERM, ESRCH};
+use super::block_on;
 #[cfg(all(unix, feature = "process"))]
 use super::{ScriptedCapture, capture_group, sequence};
-use crate::rt::runtime::block_on;
 #[cfg(feature = "process")]
 use lgwks_std::process::ContainmentMechanism;
 use std::num::NonZeroU64;

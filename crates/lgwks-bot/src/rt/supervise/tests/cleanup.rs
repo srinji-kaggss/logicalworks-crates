@@ -8,13 +8,13 @@ use super::super::outcome::{CleanupReceipt, TaskOutcome};
 use super::super::supervisor::Supervisor;
 #[cfg(all(unix, feature = "process"))]
 use super::super::{CONTAINMENT_ROUNDS, DEATH_CONFIRM_PASSES};
+use super::block_on;
 #[cfg(all(unix, feature = "process"))]
 use super::{
     EpermGroupSignaller, FailingGroupObserver, ScriptedCapture, UnexpectedGroupSignaller,
     armed_group, capture_group, group_seams, recording, sequence, settled_tasks, test_group,
     whole_capture,
 };
-use crate::rt::runtime::block_on;
 #[cfg(feature = "process")]
 use lgwks_std::process::ContainmentMechanism;
 use std::sync::Arc;
