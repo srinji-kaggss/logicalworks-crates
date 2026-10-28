@@ -2,8 +2,8 @@
 //! the errors building or driving one can report.
 
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::{fmt, io};
 
@@ -307,7 +307,6 @@ impl HostBuilder {
                 domains: self.domains,
                 repair_attempts: self.repair_attempts,
                 repair_spend: self.repair_spend,
-                reactor: Mutex::new(None),
             }),
         })
     }
@@ -415,8 +414,8 @@ pub struct Admission<'installation> {
 
 impl fmt::Debug for Admission<'_> {
     /// The counters, and not the installation: the point of this snapshot is
-    /// the numbers, and rendering the reactor a host owns would make a log line
-    /// say nothing useful.
+    /// the numbers, and rendering the store and ledger a host owns would make a
+    /// log line say nothing useful.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Admission")

@@ -2,6 +2,26 @@
 
 use super::*;
 
+/// Run `future` on a current-thread runtime built for this call: the runtime
+/// the defect deadlocked, where the calling thread is the driver.
+///
+/// The free `lgwks_bot::block_on` drives the multi-thread process driver (ADR
+/// 0006 R2), where a parked caller leaves the workers running and the
+/// deadlock cannot happen, so these bodies name the runtime they are about.
+/// The crate's builder keeps current-thread crate-private (`script!` is the one
+/// supported interface, #526), so this reaches the engine through the
+/// `lgwks_deps` facade. Panics, as the free one does, if the OS refuses the
+/// runtime.
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    let mut builder = lgwks_deps::tokio::runtime::Builder::new_current_thread();
+    match builder.enable_all().build() {
+        Ok(runtime) => runtime.block_on(future),
+        Err(error) => std::panic::resume_unwind(Box::new(format!(
+            "ecs_tick: the OS refused a current-thread runtime: {error}"
+        ))),
+    }
+}
+
 // ── The guarded bodies ─────────────────────────────────────────────────────
 
 /// The synchronous adapter refuses inside the shipped current-thread runtime.
@@ -15,8 +35,8 @@ pub(super) fn refusal_current_thread() -> TestResult {
     let log = Rc::new(RefCell::new(Vec::new()));
     let mut bot = timer_bot("refusal-current-thread", &log)?;
 
-    // The shipped current-thread runtime: `lgwks_bot::block_on` builds one per
-    // call, and on this runtime the calling thread is the driver.
+    // A current-thread runtime, built per call by `block_on` above: on it the
+    // calling thread is the driver.
     let refused = block_on(async { bot.tick() });
     match refused {
         Err(BotError::TickInsideRuntime) => {}

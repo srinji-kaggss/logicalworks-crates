@@ -6,13 +6,12 @@ use super::super::lease::Lease;
 #[cfg(all(unix, feature = "process"))]
 use super::super::outcome::TaskOutcome;
 use super::super::supervisor::Supervisor;
-use super::drain;
 #[cfg(all(unix, feature = "process"))]
 use super::whole_capture;
+use super::{block_on, drain};
 #[cfg(feature = "script")]
 use super::{settle, yield_until};
 use crate::rt::clock::Clock;
-use crate::rt::runtime::block_on;
 use crate::rt::task::yield_now;
 #[cfg(feature = "script")]
 use crate::rt::tenancy::SpawnRefused;

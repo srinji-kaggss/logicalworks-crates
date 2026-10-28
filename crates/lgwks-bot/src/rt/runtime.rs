@@ -1,15 +1,24 @@
-//! The orchestration runtime, explicitly owned.
+//! The orchestration runtime: one process driver, and runtimes a caller owns.
 //!
-//! `lgwks_bot` is the async runtime its callers enter: a [`Runtime`] is
-//! constructed, owned, and dropped by its caller, and every task runs on a
-//! runtime the caller can name. There is no global reactor. [`Handle`] is the
-//! cloneable capability to place work on a runtime that is owned elsewhere,
-//! and the free [`block_on`] is the current-thread one-off for synchronous code
-//! with no runtime to name.
+//! ADR 0006 decision 2: a process holds one tokio runtime, owned by the driver.
+//! The crate-private `driver` builds it on first use and hands out its [`Handle`]; the host's
+//! `block_on`, the estate's supervised tiers and the free [`block_on`] all run
+//! on it, so none of them builds a runtime of its own. Every multi-thread
+//! runtime is its own worker pool, I/O driver and timer wheel, and several of
+//! them in one process compete for the same cores. The driver lives for the
+//! process: dropping a host or an estate cancels and aborts that owner's work,
+//! and leaves the driver to the others.
+//!
+//! A caller that wants a runtime of its own, with its own shutdown, still builds
+//! a [`Runtime`] and owns it; [`Handle`] is the cloneable capability to place
+//! work on a runtime owned elsewhere.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::future::Future;
 use std::io;
 use std::num::NonZeroUsize;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 /// Maximum number of native worker threads accepted by [`Builder`].
@@ -34,7 +43,8 @@ pub(crate) const DEFAULT_THREAD_NAME: &str = "lgwks-bot";
 /// Configures and builds the owned orchestration [`Runtime`].
 ///
 /// Native targets drive a multi-thread scheduler through the crate-owned
-/// engine. WASM targets use the
+/// engine, or the current-thread one the crate's own tests ask for. WASM
+/// targets use the
 /// current-thread scheduler because WASM has no native worker-thread driver.
 /// Native defaults are discovered, never hardcoded: worker count follows
 /// [`std::thread::available_parallelism`] and the thread name is
@@ -57,6 +67,9 @@ pub struct Builder {
     /// Stack size in bytes for native workers, or `None` for the engine's default
     /// of 2 MiB. Ignored on WASM.
     thread_stack_size: Option<NonZeroUsize>,
+    /// Whether the runtime drives every task on the thread that calls
+    /// `block_on`, with no worker pool. Always so on WASM.
+    current_thread: bool,
 }
 
 impl Default for Builder {
@@ -71,6 +84,7 @@ impl Default for Builder {
             thread_name: String::from(DEFAULT_THREAD_NAME),
             max_blocking_threads: None,
             thread_stack_size: None,
+            current_thread: false,
         }
     }
 }
@@ -140,6 +154,24 @@ impl Builder {
         self
     }
 
+    /// Drive every task on the thread that calls [`Runtime::block_on`], with no
+    /// worker pool.
+    ///
+    /// The scheduler for the crate's tests whose tasks must interleave on one
+    /// thread, observing yielding in the order they created it. The process
+    /// driver every door shares stays multi-thread; this runtime is the
+    /// caller's own. An explicit [`Builder::worker_threads`] beside it is
+    /// refused when the runtime is built. WASM runtimes are current-thread
+    /// already, so there it changes nothing. Crate-private and test-only:
+    /// `script!` is the one supported interface (#526), so the builder's
+    /// public surface does not grow.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn current_thread(mut self) -> Self {
+        self.current_thread = true;
+        self
+    }
+
     /// Build the runtime.
     ///
     /// This allocates native worker threads immediately; a failure is the OS
@@ -156,10 +188,27 @@ impl Builder {
             return refusal;
         }
 
+        if self.current_thread && self.worker_threads.is_some() {
+            let refusal = Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "lgwks_bot: worker_threads is unsupported on a current-thread runtime",
+            ));
+            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "build: returning an error to the caller");
+            return refusal;
+        }
+
         #[cfg(not(target_family = "wasm"))]
-        let workers = self.worker_threads.or_else(discover_workers);
+        let workers = if self.current_thread {
+            None
+        } else {
+            self.worker_threads.or_else(discover_workers)
+        };
         #[cfg(not(target_family = "wasm"))]
-        let mut builder = lgwks_deps::tokio::runtime::Builder::new_multi_thread();
+        let mut builder = if self.current_thread {
+            lgwks_deps::tokio::runtime::Builder::new_current_thread()
+        } else {
+            lgwks_deps::tokio::runtime::Builder::new_multi_thread()
+        };
         #[cfg(target_family = "wasm")]
         let mut builder = lgwks_deps::tokio::runtime::Builder::new_current_thread();
         #[cfg(not(target_family = "wasm"))]
@@ -192,8 +241,60 @@ impl Builder {
             builder.thread_stack_size(bytes.get());
         }
         builder.enable_all();
+        #[cfg(test)]
+        BUILT.with(|built| built.set(built.get().saturating_add(1)));
         builder.build().map(|inner| Runtime { inner })
     }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Runtimes [`Builder::build`] has made on this thread.
+    static BUILT: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Runtimes [`Builder::build`] has made on the calling thread, so a test can
+/// count the ones its own doors built (`one_process_holds_one_driver`) while
+/// other tests in a shared-process runner build theirs. Both readers need the
+/// `script` feature, so a build without it leaves the counter unread.
+#[cfg(all(test, feature = "script"))]
+pub(crate) fn built_here() -> usize {
+    BUILT.with(Cell::get)
+}
+
+/// The process driver, set once by [`driver`] and never dropped.
+static DRIVER: OnceLock<Runtime> = OnceLock::new();
+
+/// Serialises the driver's first build, so two first callers build one runtime.
+static BUILDING: Mutex<()> = Mutex::new(());
+
+/// The handle of the one process driver, building it on first use.
+///
+/// Built with [`Builder`]'s defaults: the discovered worker count, named
+/// `lgwks-bot`. Once built, a call is one lock-free read, so every synchronous
+/// door on every thread reads the driver without contending; only the first
+/// build takes [`BUILDING`], and reads the slot again under it. A poisoned lock
+/// is recovered because it guards no state of its own. `OnceLock` rather than
+/// `LazyLock` because the build can fail and must say why.
+///
+/// # Errors
+///
+/// The OS refusing the driver's worker threads or I/O resources. Nothing is
+/// stored then, so the next call tries again.
+pub(crate) fn driver() -> io::Result<Handle> {
+    if let Some(runtime) = DRIVER.get() {
+        return Ok(runtime.handle());
+    }
+    let _building = match BUILDING.lock() {
+        Ok(building) => building,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(runtime) = DRIVER.get() {
+        return Ok(runtime.handle());
+    }
+    let built = Builder::new().build()?;
+    // Under `BUILDING` no other caller sets the slot, so `built` is the value stored.
+    Ok(DRIVER.get_or_init(|| built).handle())
 }
 
 /// The native worker count discovered from the OS, or `None` when the platform
@@ -262,21 +363,6 @@ impl Runtime {
     pub fn shutdown_timeout(self, timeout: Duration) {
         self.inner.shutdown_timeout(timeout);
     }
-
-    /// Shut the runtime down without waiting for anything to finish.
-    ///
-    /// The async-safe counterpart to [`Runtime::shutdown_timeout`]: in-flight work is dropped
-    /// rather than joined, so calling this from inside async never parks the calling thread —
-    /// including from the shutdown path of an owner the runtime would otherwise outlive. A
-    /// blocking task already executing keeps its thread; it is detached from the shutdown, not
-    /// aborted by it.
-    ///
-    /// Crate-private: its callers are the `script` tier's owners of a runtime (`task::Host` and
-    /// `rt::estate`), and a caller outside the crate has [`Runtime::shutdown_timeout`].
-    #[cfg(feature = "script")]
-    pub(crate) fn shutdown_background(self) {
-        self.inner.shutdown_background();
-    }
 }
 
 /// A cloneable capability to run work on a [`Runtime`] owned elsewhere.
@@ -329,32 +415,185 @@ impl crate::ecs::EcsBot {
     }
 }
 
-/// Run one future to completion on a private current-thread runtime.
+/// Run one future to completion on the process driver, blocking the calling
+/// thread.
 ///
-/// This is the one-off entry for synchronous code that has no runtime to name:
-/// it builds and tears it down per call, so code that makes repeated async
-/// calls must hold a [`Runtime`] instead. Current-thread, so a borrowed or
-/// non-`Send` one-off drives where a multi-thread driver would refuse it.
-/// Panics if called from within an async context, and panics if the OS refuses
-/// the runtime's driver resources, a condition under which no async work could
-/// proceed.
+/// This is the one-off entry for synchronous code that has no runtime to
+/// name; it builds nothing after the driver's first use. The future itself is
+/// polled on the calling thread, so a borrowed or non-`Send` one-off drives;
+/// what it spawns runs on the driver's workers. Panics if called from within an
+/// async context, and panics if the OS refuses the driver's resources, a
+/// condition under which no async work could proceed.
 pub fn block_on<F: Future>(future: F) -> F::Output {
-    let mut builder = lgwks_deps::tokio::runtime::Builder::new_current_thread();
-    builder.enable_all();
-    let runtime = match builder.build() {
-        Ok(runtime) => runtime,
+    match driver() {
+        Ok(handle) => handle.block_on(future),
         // The contract is that this reports on the calling thread rather than
         // returning an error, and there is no error channel in `F::Output` to
         // report through. `resume_unwind` is the crate's form for a documented,
         // unavoidable panic (`lgwks_std::task::JoinHandle` uses it for the same
         // reason): the caller is a synchronous frame with nowhere to propagate
         // to, and the alternative (hanging on a future no driver can poll) is
-        // strictly worse. A current-thread runtime needs only the driver's
-        // resources, so an OS refusal means every timer and IO operation in
-        // `future` would be unrunnable anyway.
+        // strictly worse.
         Err(error) => std::panic::resume_unwind(Box::new(format!(
-            "lgwks_bot::rt: the OS refused a current-thread runtime: {error}"
+            "lgwks_bot::rt: the OS refused the process driver: {error}"
         ))),
-    };
-    runtime.block_on(future)
+    }
+}
+
+/// ADR 0006 R2 falsifier: a process that builds an estate, runs a host, ticks a bot and blocks on
+/// a future holds exactly one runtime.
+#[cfg(all(test, feature = "script"))]
+mod one_driver_tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use super::{block_on, built_here, driver};
+    use crate::ecs::tests::test_effects;
+    use crate::rt::estate::Estate;
+    use crate::rt::task::yield_now;
+    use crate::task::task;
+    use crate::{Auth, Bot, BotError, Cap, EffectLifetime, Execute, GrantSet, Observe};
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// A source that yields to the driver once, then reports 1.
+    struct YieldsOnce;
+
+    impl Observe for YieldsOnce {
+        type Output = u32;
+
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+
+        async fn poll(&self, call: (Auth, ())) -> Result<u32, BotError> {
+            call.0.check(Observe::required_caps(self))?;
+            yield_now().await;
+            Ok(1)
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::one_driver_source"
+        }
+    }
+
+    /// An action that marks the tick it ran in.
+    struct Marks(Rc<Cell<u32>>);
+
+    impl Execute for Marks {
+        type Input = u32;
+        type Output = ();
+
+        fn required_caps(&self) -> &[Cap] {
+            &[]
+        }
+
+        fn effect_lifetime(&self) -> EffectLifetime {
+            EffectLifetime::Local
+        }
+
+        async fn execute_action(&self, call: (Auth, &u32)) -> Result<(), BotError> {
+            call.0.check(Execute::required_caps(self))?;
+            self.0.set(*call.1);
+            Ok(())
+        }
+
+        fn domain_id(&self) -> &str {
+            "test::one_driver_action"
+        }
+    }
+
+    #[test]
+    fn one_process_holds_one_driver() -> TestResult {
+        let before = built_here();
+        let probe = task("one-driver", |_scope, input: u64| async move {
+            Ok(input.saturating_add(1))
+        })?;
+        let mut supervised = Estate::supervised("acme", 4)?;
+        let in_process = Estate::in_process("globex")?;
+        let first = supervised.run_blocking(&probe, 1)?;
+        let second = in_process.run_blocking(&probe, 2)?;
+        let third = in_process.host().block_on(&probe, 3)?;
+        let fourth = block_on(async { 4_u64 });
+        let handle = supervised
+            .handle()
+            .ok_or("a supervised estate carries the driver")?;
+        let fifth = handle.block_on(async { 5_u64 });
+        let drained = supervised.shutdown_blocking()?;
+        let after_shutdown = driver()?.block_on(async { 6_u64 });
+        let ran = Rc::new(Cell::new(0));
+        let mut bot = Bot::builder("one-driver")
+            .observe(YieldsOnce)
+            .on(|seen: &u32| *seen == 1, Marks(Rc::clone(&ran)))
+            .with_effects(test_effects()?)
+            .build(&GrantSet::empty())?;
+        let fired = block_on(bot.tick_async())?;
+        assert_eq!((fired, ran.get()), (1, 1), "the bot ticked on the driver");
+        assert_eq!(
+            (first.output(), second.output(), third.output()),
+            (Some(&2), Some(&3), Some(&4)),
+            "every door ran its run"
+        );
+        assert_eq!((fourth, fifth, after_shutdown), (4, 5, 6));
+        assert_eq!(drained.runs_admitted(), 1, "the estate counted its own run");
+        // At most one: a runner that shares the process across tests may have built the
+        // driver before this test began, and then this one builds none.
+        assert!(
+            built_here().saturating_sub(before) <= 1,
+            "two estates, a host, a bot tick and three block_on calls built one runtime"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "script"))]
+#[path = "sim_one_driver.rs"]
+mod sim_one_driver;
+
+#[cfg(all(test, not(target_family = "wasm")))]
+#[path = "sim_current_thread.rs"]
+mod sim_current_thread;
+
+/// [`Builder::current_thread`]: the caller's own one-thread runtime, which the
+/// supervise tests build where tasks must interleave on one thread.
+#[cfg(all(test, not(target_family = "wasm")))]
+mod current_thread_tests {
+    use std::cell::Cell;
+    use std::io;
+    use std::num::NonZeroUsize;
+
+    use super::Builder;
+
+    std::thread_local! {
+        /// Set on the thread that blocks; a worker thread never sets it.
+        static CALLER: Cell<bool> = const { Cell::new(false) };
+    }
+
+    #[test]
+    fn a_current_thread_runtime_runs_what_it_spawns_on_the_calling_thread() -> io::Result<()> {
+        CALLER.with(|caller| caller.set(true));
+        let runtime = Builder::new().current_thread().build()?;
+        let spawned = runtime.block_on(async {
+            let mut owned = crate::rt::task::JoinSet::new();
+            owned.spawn(async { CALLER.with(Cell::get) });
+            owned.join_next().await
+        });
+        assert!(
+            matches!(spawned, Some(Ok(true))),
+            "a spawned task runs on the thread that blocks"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_current_thread_runtime_refuses_a_worker_count() {
+        let refused = Builder::new()
+            .current_thread()
+            .worker_threads(NonZeroUsize::new(2))
+            .build();
+        assert!(
+            matches!(refused, Err(ref error) if error.kind() == io::ErrorKind::InvalidInput),
+            "a worker count beside current_thread is refused, not ignored"
+        );
+    }
 }

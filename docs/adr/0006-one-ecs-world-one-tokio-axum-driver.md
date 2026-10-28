@@ -102,6 +102,19 @@ Supersedes ADR 0005. Builds on `docs/bevy-admission.md`, `docs/bot-on-ecs.md` an
 
 `tests/it/core_boundary.rs` holds decision 4 (R1, landed with this record:
 `the_core_names_no_driver_and_only_ecs_names_bevy` reads every production file,
-`a_planted_driver_import_in_the_core_is_refused` is the falsifier). Decisions 2, 6, 7 and 8 are
-`review only` until R2's runtime count, the `script` drift test and R5's printed numbers land, owner
-the executing agent of each step, dated 2026-10-26. The `doc-governance` lane holds this record's shape.
+`a_planted_driver_import_in_the_core_is_refused` is the falsifier).
+
+Decision 2 is held by R2, landed 2026-10-28. `rt::runtime::driver` builds the one runtime on first
+use; `Host`, `Estate` and `rt::block_on` take its handle, and the host's reactor and the estate's
+runtime are gone. `rt::runtime::one_driver_tests::one_process_holds_one_driver` builds an estate,
+runs a host, ticks a bot and blocks on futures, and counts the runtimes `Builder::build` made on
+that thread: one or none. `sim_one_driver::sim_every_door_in_any_order_shares_one_driver` draws
+that schedule from a seed across four tenants. Counting builds replaces counting worker threads,
+because a build is what makes a runtime. The estate smoke binary (`src/bin/estate.rs`) runs on the
+estate's driver. Tests that need one thread build their own current-thread runtime by name
+(`Builder::current_thread`, crate-private). The driver stays inside `rt`, behind the `rt` feature;
+R2 changes no feature, so a build without `rt` compiles what it compiled before.
+
+Decisions 6, 7 and 8 stay `review only` until the `script` drift test and R5's printed numbers
+land, owner the executing agent of each step, dated 2026-10-26. The `doc-governance` lane holds
+this record's shape.

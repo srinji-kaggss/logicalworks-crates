@@ -386,8 +386,10 @@ jobs:
   debug_e2e:
     name: successful end-to-end journey result
     needs: workspace_tail
-    # On lwc-6, which holds only a target leg that has ended: see the row above.
-    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-6]
+    # On lwc-7, whose no-default suite ends about a minute into the run. lwc-6
+    # holds both storefront consumer shards and a target leg, and this 6 s row
+    # queued 82 s behind them there, the run's tail at 358 s (run 40774539269).
+    runs-on: [self-hosted, macOS, ARM64, lwc, lwc-7]
     timeout-minutes: 5
     steps:
       - name: Download gate evidence

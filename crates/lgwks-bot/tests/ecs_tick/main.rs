@@ -45,7 +45,7 @@ use lgwks_bot::spec::{
 };
 use lgwks_bot::{
     Auth, Bot, BotError, Builder, Cap, DispatchCertainty, EffectLifetime, Execute, GrantSet,
-    Observe, block_on,
+    Observe,
 };
 
 #[path = "../support/effects.rs"]

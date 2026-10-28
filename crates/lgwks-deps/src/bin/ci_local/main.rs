@@ -38,8 +38,8 @@
 //! * A lane's output goes to `<target>/gate-logs/<lane>.log`; a lane that fails
 //!   prints the tail of its log and the path.
 //!
-//! Exit codes: 0 every applicable lane passed; 1 a lane failed or was blocked; 2
-//! usage or manifest error.
+//! Exit codes: 0 every applicable lane passed; 1 a lane failed or was blocked, or
+//! the run took longer than [`WALL_BUDGET`]; 2 usage or manifest error.
 
 mod builtins;
 #[path = "../shared/children.rs"]
@@ -63,6 +63,8 @@ mod utc;
 
 #[cfg(all(test, unix))]
 mod cli_tests;
+#[cfg(test)]
+mod sim_wall_budget;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -70,7 +72,7 @@ use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use children::Children;
 use console::Console;
@@ -82,6 +84,16 @@ use utc::stamp;
 
 /// How many trailing lines of a failed lane's log are printed.
 const LOG_TAIL_LINES: usize = 150;
+
+/// The longest a run may take: five minutes of wall time, and not a nanosecond
+/// above (the Director, 2026-10-28).
+const WALL_BUDGET: Duration = Duration::from_secs(300);
+
+/// Whether a run that took `elapsed` broke [`WALL_BUDGET`]. Durations compare in
+/// whole nanoseconds, so 300 s passes and 300 s plus one nanosecond does not.
+fn over_budget(elapsed: Duration) -> bool {
+    elapsed > WALL_BUDGET
+}
 
 /// Why the gate could not run.
 #[derive(Debug)]
@@ -521,18 +533,27 @@ pub(crate) fn run(arguments: &[String], console: &Console) -> u8 {
     let wall = Instant::now();
     let results = run_selected(&selected, &options, &root, console);
     console.say(&format_table(&results));
-    console.say(&format!("wall: {:.1} s", wall.elapsed().as_secs_f64()));
+    let elapsed = wall.elapsed();
+    console.say(&format!(
+        "wall: {:.1} s of a {} s budget",
+        elapsed.as_secs_f64(),
+        WALL_BUDGET.as_secs()
+    ));
     if options.receipt
         && let Err(code) = write_receipt(console, &root, &manifest, &results, &identity, &mode)
     {
         return code;
+    }
+    let slow = over_budget(elapsed);
+    if slow {
+        console.warn(&overrun(elapsed));
     }
     let refused: Vec<&LaneResult> = results
         .iter()
         .filter(|result| matches!(result.status, Status::Fail | Status::Blocked))
         .collect();
     if refused.is_empty() {
-        return 0;
+        return u8::from(slow);
     }
     console.warn("\nrefused lanes:");
     for result in refused {
@@ -552,8 +573,43 @@ pub(crate) fn run(arguments: &[String], console: &Console) -> u8 {
     1
 }
 
+/// The refusal for a run past [`WALL_BUDGET`], with the overrun to the millisecond.
+fn overrun(elapsed: Duration) -> String {
+    format!(
+        "ci-local: the run took {:.3} s, {:.3} s past its {} s wall budget",
+        elapsed.as_secs_f64(),
+        elapsed.saturating_sub(WALL_BUDGET).as_secs_f64(),
+        WALL_BUDGET.as_secs()
+    )
+}
+
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let console = Console::new(Box::new(io::stdout()), Box::new(io::stderr()));
     ExitCode::from(run(&arguments, &console))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{WALL_BUDGET, over_budget, overrun};
+
+    // Director 2026-10-28: "AND NOT A NANOSECOND ABOVE 5 MINUTE". A one-decimal
+    // float would print 300.04 s as 300.0 s; the budget compares whole nanoseconds.
+    #[test]
+    fn a_nanosecond_past_five_minutes_fails_the_gate() {
+        assert!(
+            !over_budget(WALL_BUDGET),
+            "exactly five minutes is inside the budget"
+        );
+        assert!(over_budget(
+            WALL_BUDGET.saturating_add(Duration::from_nanos(1))
+        ));
+        assert!(!over_budget(Duration::ZERO));
+        assert_eq!(
+            overrun(Duration::from_millis(301_250)),
+            "ci-local: the run took 301.250 s, 1.250 s past its 300 s wall budget"
+        );
+    }
 }

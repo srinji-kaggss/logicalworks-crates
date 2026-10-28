@@ -1,16 +1,15 @@
-//! Admission: the synchronous entry, the owned reactor, the budget a run is
+//! Admission: the synchronous entry on the process driver, the budget a run is
 //! charged to, and the values a finished or declined run is assembled from.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, MutexGuard};
 use std::time::Instant;
 
 use crate::cap::{Cap, Deficit, Shortage, uncovered};
 use crate::effect::RunId;
 use crate::gate::GrantSet;
-use crate::journal::owner::lock;
 use crate::registry::DomainRegistry;
-use crate::rt::runtime::{Handle, Runtime};
+use crate::rt::runtime::Handle;
 use crate::rt::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::script::run_store::AuthorityCheck;
 use crate::script::{FlowError, Scope, TrailEntry};
@@ -23,11 +22,11 @@ use super::{
 };
 
 impl Host {
-    /// Run `task` over `input` from synchronous code, driving it on a runtime
-    /// this host owns.
+    /// Run `task` over `input` from synchronous code, driving it on the process
+    /// driver.
     ///
-    /// The host builds its reactor once and reuses it, so repeated calls do not
-    /// pay a runtime per call. Inside an existing runtime this **refuses**
+    /// The driver is built once per process and shared, so repeated calls, and
+    /// other hosts, do not pay a runtime each. Inside an existing runtime this **refuses**
     /// rather than parking the calling thread: parking a thread that owns a
     /// reactor is a deadlock, not a slow call, so it returns
     /// [`HostError::InsideRuntime`] — the same verdict, and for the same
@@ -55,25 +54,10 @@ impl Host {
         Ok(handle.block_on(self.run(task, input)))
     }
 
-    /// This host's reactor, built on first use and kept for every later call.
+    /// The process driver this host's synchronous runs drive on (ADR 0006
+    /// decision 2): the host owns no runtime of its own.
     pub(super) fn reactor(&self) -> Result<Handle, HostError> {
-        let mut slot = self.reactor_slot();
-        if let Some(runtime) = slot.as_ref() {
-            return Ok(runtime.handle());
-        }
-        let runtime = Runtime::new().map_err(|cause| HostError::Runtime { cause })?;
-        let handle = runtime.handle();
-        *slot = Some(runtime);
-        Ok(handle)
-    }
-
-    /// The reactor slot's lock.
-    ///
-    /// Poisoning recovers rather than propagating: the slot holds a
-    /// [`Runtime`], whose `Drop` is infallible, so no panic path can leave a
-    /// half-installed reactor behind.
-    pub(super) fn reactor_slot(&self) -> MutexGuard<'_, Option<Runtime>> {
-        lock(&self.inner.reactor)
+        crate::rt::runtime::driver().map_err(|cause| HostError::Runtime { cause })
     }
 
     /// Wait for one of this host's permits, bounded by the run's deadline and

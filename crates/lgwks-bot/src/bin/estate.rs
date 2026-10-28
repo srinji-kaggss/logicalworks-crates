@@ -11,7 +11,6 @@ use std::io::Write as _;
 
 use lgwks_bot::gate::GrantReplacement;
 use lgwks_bot::rt::estate::{Estate, EstateError, EstateReport};
-use lgwks_bot::rt::runtime::Runtime;
 use lgwks_bot::rt::supervise::TaskId;
 use lgwks_bot::spec::EffectScope;
 use lgwks_bot::task::{Disposition, task};
@@ -303,8 +302,12 @@ impl Drop for Scratch {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut mismatch: Option<String> = None;
-    let driver = Runtime::new()?;
     let mut estate = Estate::supervised("acme", 8)?;
+    // The process driver (ADR 0006 R2): every block below runs on it, so the binary that proves
+    // the estate holds one runtime, as the estate does.
+    let driver = estate
+        .handle()
+        .ok_or("a supervised estate carries the process driver")?;
     let supervised = estate.supervisor().is_some();
     say(&format!(
         "estate: tenant={} tier={} runtime={} supervisor={supervised} store={}",
@@ -435,9 +438,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
         );
     }
-    // The run above built the host's own reactor; dropping the estate inside a runtime is the
-    // panic tokio raises for a plain runtime drop, so reaching the next line proves the host ends
-    // its reactor in the background.
+    // Dropping a runtime inside async is the panic tokio raises; the estate owns none, so reaching
+    // the next line proves dropping it there releases its work and leaves the driver running.
     driver.block_on(async move { drop(bare) });
     say("in-process drop inside a runtime: ok")?;
 

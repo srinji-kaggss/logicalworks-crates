@@ -77,11 +77,11 @@ deterministic, and only the result order of `join_all_bounded` is.
 
 **Worker-thread count is bounded.** `rt::runtime::MAX_WORKER_THREADS` is 1024,
 and `Builder::worker_threads` rejects a count above it with an error rather than
-clamping silently (`crates/lgwks-bot/src/rt/runtime.rs:167`).
+clamping silently (`crates/lgwks-bot/src/rt/runtime.rs:216`).
 
 **WASM has one thread.** On `target_family = "wasm"` the runtime is built with
 `new_current_thread`, and `Builder::worker_threads(Some(_))` returns
-`io::ErrorKind::Unsupported` (`crates/lgwks-bot/src/rt/runtime.rs:164`).
+`io::ErrorKind::Unsupported` (`crates/lgwks-bot/src/rt/runtime.rs:213`).
 
 **Signals need an OS.** `rt::signal` compiles only where `unix` or
 `windows` holds, so a `full` build on another target silently lacks it.
