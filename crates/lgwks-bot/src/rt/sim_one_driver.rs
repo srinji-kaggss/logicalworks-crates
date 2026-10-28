@@ -5,9 +5,8 @@
 //! the seed is the whole schedule, and the same seed replays the same receipt.
 
 use std::fmt;
-use std::sync::atomic::Ordering;
 
-use super::{BUILT, block_on, driver};
+use super::{block_on, built_here, driver};
 use crate::rt::estate::Estate;
 use crate::sim_stream::{RECEIPT_START, Stream, fold};
 use crate::task::task;
@@ -117,7 +116,7 @@ fn simulate(seed: u64) -> Result<u64, SimError> {
 
 #[test]
 fn sim_every_door_in_any_order_shares_one_driver() -> Result<(), SimError> {
-    let before = BUILT.load(Ordering::Relaxed);
+    let before = built_here();
     for seed in SEEDS {
         let receipt = simulate(seed)?;
         assert_eq!(simulate(seed)?, receipt, "seed {seed} replays");
@@ -126,7 +125,7 @@ fn sim_every_door_in_any_order_shares_one_driver() -> Result<(), SimError> {
     // At most one: the runner may share the process, and then a test before
     // this one built the driver and this sweep builds none.
     assert!(
-        BUILT.load(Ordering::Relaxed).saturating_sub(before) <= 1,
+        built_here().saturating_sub(before) <= 1,
         "{} schedules of estates, hosts and block_on built more than one runtime",
         SEEDS.len().saturating_mul(2).saturating_add(2)
     );
