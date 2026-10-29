@@ -175,20 +175,20 @@ fn copied_tree(scratch: &Scratch) -> Result<PathBuf, Box<dyn Error>> {
         }
         std::fs::copy(&from, &to)?;
     }
-    for crate_name in [
-        "lgwks-std",
-        "lgwks-bot",
-        "lgwks-ast",
-        "lgwks-macros",
-        "lgwks-deps",
-    ] {
-        // Each member directory in full except its `target`, because `cargo
-        // metadata` loads every member manifest and resolves each package's
-        // target paths -- a manifest without its sources does not load.
-        copy_tree(
-            &root.join("crates").join(crate_name),
-            &target.join("crates").join(crate_name),
-        )?;
+    // Every directory under `crates/`, read from disk rather than named here:
+    // each workspace member lives there, and a list kept by hand fell behind
+    // the day `drishti` joined (ADR 0006 R6). Each member
+    // goes in full except its `target`, because `cargo metadata` loads every
+    // member manifest and resolves each package's target paths -- a manifest
+    // without its sources does not load.
+    for entry in std::fs::read_dir(root.join("crates"))? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            copy_tree(
+                &entry.path(),
+                &target.join("crates").join(entry.file_name()),
+            )?;
+        }
     }
     Ok(target)
 }
