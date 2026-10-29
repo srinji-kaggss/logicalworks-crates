@@ -25,8 +25,9 @@
 //! | `retry up to 3 times, waiting 100ms:` | [`retry`] | retry storms; retrying a permanent failure; a new identity per attempt |
 //! | `together:` | `try_join!` | sequential awaits that should overlap; a failed branch that keeps running |
 //! | `step name:` | [`Scope::enter`] | anonymous work with no stable key or error location |
-//! | `await ready(&db, 30s)` | [`Readiness`] | a readiness guessed by sleeping; a poll loop; a stale instance releasing dependants |
-//! | `admit the model's plan:` | [`admit`] | an untrusted payload becoming an instruction; a refusal with no location, no provenance or no ceiling |
+//! | `ready db from (readiness) within 30s:` | [`Readiness`] | a readiness guessed by sleeping; a poll loop; a stale instance releasing dependants |
+//! | `admit from model through (gate):` | [`admit`] | an untrusted payload becoming an instruction; a refusal with no location, no provenance or no ceiling |
+//! | `remember name:` | [`remember`] | an effect repeated on resume; a recorded value re-requested from a model |
 //!
 //! [`admit`] is the one way a task body crosses untrusted model or tool output
 //! into a run. It enters its step, charges one run-scoped [`Gate`] — a decoder, a
@@ -84,6 +85,7 @@
 //! [`within`]: crate::script::within
 //! [`retry`]: crate::script::retry
 //! [`admit`]: crate::script::admit
+//! [`remember`]: crate::script::remember
 //! [`Gate`]: crate::script::Gate
 //! [`FlowError`]: crate::script::FlowError
 //! [`Scope`]: crate::script::Scope
@@ -129,7 +131,7 @@ use std::time::Duration;
 use crate::rt::clock as rt_clock;
 
 pub use admit::{
-    Gate, RefusalRecord, admit, intervention_of, provenance_of, read_refusal, refusal_of,
+    Gate, RefusalRecord, admit, admit_at, intervention_of, provenance_of, read_refusal, refusal_of,
     refusal_record,
 };
 pub use compensate::{Compensations, MAX_COMPENSATIONS, compensated, compensated_at};
@@ -147,7 +149,7 @@ pub use ready::{
     ReadyOutcome,
 };
 pub use rt_clock::Clock;
-pub use run_store::{Appended, Durable, remember};
+pub use run_store::{Appended, Durable, remember, remembered_at};
 pub use scope::{Scope, StepKey, Tenant};
 pub use stream::{Overflow, PumpReport, StreamGate, pump, stream_at};
 pub use trail::{Outcome, ScriptTrail, Site, TrailEntry};

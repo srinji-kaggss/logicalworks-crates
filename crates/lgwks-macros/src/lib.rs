@@ -43,6 +43,9 @@
 //! | `compensate step:` | the undo of `step`, registered once that step has finished, run only if the saga later fails |
 //! | `whenever x in batches, buffering N, drop oldest:` (or `drop newest`, `refuse`) | each event of a live feed in arrival order, each in its own scope; `batches` is awaited for the next `Option<Vec<_>>` and `None` ends the feed; at most `N` events wait, and past that the policy decides; the value is the run's `PumpReport` |
 //! | `justify with (rules):` | the block in a scope that answers to `rules`: every step, node and retry attempt inside asks them first, and is slowed, parked or stopped as they decide |
+//! | `remember name:` | the block once per run; a resume reads its value back |
+//! | `admit from model through (gate):` (or `tool`, `document`) | the block's bytes admitted as a `Plan`; a refusal fails the step |
+//! | `ready x from (readiness) within 30s:` | the block once `readiness` is signalled, `x` bound to it |
 //!
 //! Every step keys by tenant, run and path (`Scope::key`): one run's attempts
 //! and restarts share a key, two runs of one flow never do, and work that is

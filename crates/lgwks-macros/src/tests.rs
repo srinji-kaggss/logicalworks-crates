@@ -29,7 +29,7 @@ pub(crate) fn expand(source: &str) -> Result<String, String> {
 ///
 /// A word's guarantee may cite a case here by its name (`lexicon::Evidence`),
 /// which is why the table is visible to the crate.
-pub(crate) const REFUSALS: [(&str, &str, &str); 43] = [
+pub(crate) const REFUSALS: [(&str, &str, &str); 47] = [
     (
         "unwrap by path",
         "flow f(x: Option<u8>):\n    let n = Option::unwrap(x)\n",
@@ -225,6 +225,26 @@ pub(crate) const REFUSALS: [(&str, &str, &str); 43] = [
         "justify with no rules",
         "flow f():\n    justify:\n        1\n",
         "`justify with (rules):`",
+    ),
+    (
+        "remember with no name",
+        "flow f():\n    remember:\n        1\n",
+        "`remember` reads `remember <name>:`",
+    ),
+    (
+        "admit with no gate",
+        "flow f(reply: &[u8]):\n    admit from model:\n        reply\n",
+        "`admit` reads `admit from model through (gate):`",
+    ),
+    (
+        "admit from an unknown producer",
+        "flow f(reply: &[u8], gate: &Gate):\n    admit from oracle through (gate):\n        reply\n",
+        "`model`, `tool` or `document`",
+    ),
+    (
+        "ready with no deadline",
+        "flow f(db: &Readiness<u8>):\n    ready pool from (db):\n        1\n",
+        "a `ready` waits under a deadline",
     ),
     (
         "else without if",
@@ -442,6 +462,12 @@ fn the_structured_words_expand_to_their_runtime_calls() -> Result<(), String> {
                   \x20       tick.record()\n\
                   \x20   let code = justify with (rules):\n\
                   \x20       repo.call()\n\
+                  \x20   let answer = remember ask:\n\
+                  \x20       repo.ask()\n\
+                  \x20   let plan = admit from tool through (gate):\n\
+                  \x20       repo.reply()\n\
+                  \x20   let rows = ready pool from (db) within 2s:\n\
+                  \x20       pool.awaited().len()\n\
                   \x20   give back report.succeeded().len()\n";
     let expanded = expand(source)?;
     for fragment in [
@@ -458,6 +484,13 @@ fn the_structured_words_expand_to_their_runtime_calls() -> Result<(), String> {
         "StepKind :: Compensate",
         "StepKind :: Whenever",
         "StepKind :: Justify",
+        ":: lgwks_bot :: script :: remembered_at",
+        ":: lgwks_bot :: script :: admit_at",
+        "Source :: ToolOutput",
+        ". wait (scope , :: core :: time :: Duration :: from_nanos (2000000000))",
+        "StepKind :: Remember",
+        "StepKind :: Admit",
+        "StepKind :: Ready",
     ] {
         assert!(
             expanded.contains(fragment),
@@ -483,7 +516,7 @@ fn an_unknown_block_lists_every_block_word_in_one_sentence() -> Result<(), Strin
         refusal,
         "unknown block; a line ending in `:` is one of `each`, `within`, `retry`, \
          `together`, `step`, `for`, `if`/`else`, `graph`, `saga`, `whenever`, \
-         `justify`, or `let x = <block>:`",
+         `justify`, `remember`, `admit`, `ready`, or `let x = <block>:`",
     );
     Ok(())
 }

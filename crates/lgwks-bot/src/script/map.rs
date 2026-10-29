@@ -319,4 +319,11 @@ pub enum StepKind {
     Whenever,
     /// `justify with (rules):`; the subject is the rules as written.
     Justify,
+    /// `remember name:`; the subject is the name.
+    Remember,
+    /// `admit from <producer> through (gate):`; the subject is the gate as
+    /// written.
+    Admit,
+    /// `ready x from (readiness) within D:`; the subject is `D`.
+    Ready,
 }

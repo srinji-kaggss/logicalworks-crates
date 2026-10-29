@@ -1,6 +1,7 @@
 //! The grammar generator's structured words: `graph` and its `node`s, `saga`
-//! and its `compensate` lines, `whenever`, and `justify`, each drawn with the
-//! shapes the parser accepts, so the band says every word of the lexicon.
+//! and its `compensate` lines, `whenever`, `justify`, `remember`, `admit` and
+//! `ready`, each drawn with the shapes the parser accepts, so the band says
+//! every word of the lexicon.
 
 use std::fmt;
 
@@ -40,12 +41,56 @@ impl Script {
     /// One structured word at `depth`, bound with `let`, with its body.
     pub(super) fn structured(&mut self, depth: usize) -> Result<(), Drawn> {
         self.say(Kind::Let);
-        match self.draw.index(4)? {
+        match self.draw.index(7)? {
             0 => self.graph(depth),
             1 => self.saga(depth),
             2 => self.whenever(depth),
-            _ => self.justify(depth),
+            3 => self.justify(depth),
+            4 => self.remember(depth),
+            5 => self.admit(depth),
+            _ => self.ready(depth),
         }
+    }
+
+    /// `remember name:` around a block of statements.
+    fn remember(&mut self, depth: usize) -> Result<(), Drawn> {
+        let name = self.name();
+        self.line(
+            depth,
+            format!("let r{name} = remember answer{name}:"),
+            Some(Kind::Remember),
+        );
+        Ok(self.statements(depth.saturating_add(1))?)
+    }
+
+    /// `admit` from each of the three producers, its payload the last line.
+    fn admit(&mut self, depth: usize) -> Result<(), Drawn> {
+        let name = self.name();
+        let producer = *self.draw.pick(&["model", "tool", "document"])?;
+        self.line(
+            depth,
+            format!("let a{name} = admit from {producer} through (site.gate()):"),
+            Some(Kind::Admit),
+        );
+        self.line(depth.saturating_add(1), format!("site.reply({name})"), None);
+        Ok(())
+    }
+
+    /// `ready` on a readiness under a deadline, its body using the release.
+    fn ready(&mut self, depth: usize) -> Result<(), Drawn> {
+        let name = self.name();
+        let deadline = *self.draw.pick(&["250ms", "2s", "(site.deadline())"])?;
+        self.line(
+            depth,
+            format!("let w{name} = ready db{name} from (site.db()) within {deadline}:"),
+            Some(Kind::Ready),
+        );
+        self.line(
+            depth.saturating_add(1),
+            format!("site.size(db{name})"),
+            None,
+        );
+        Ok(())
     }
 
     /// `graph:` with one to three nodes, each needing some of the nodes

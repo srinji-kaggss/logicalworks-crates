@@ -1,13 +1,14 @@
 //! The structured words' nodes: `graph` and its `node`s, `compensate` inside
-//! a `saga`, `whenever`, and `justify`.
+//! a `saga`, `whenever`, `justify`, `admit` and `ready`.
 //!
 //! A `saga` is a [`Step`](super::Step): a name and a body, read as one; what
 //! makes it a saga is the [`Construct::Saga`](super::Construct::Saga) it is
-//! wrapped in and the `compensate` lines its body may hold.
+//! wrapped in and the `compensate` lines its body may hold. A `remember` is a
+//! `Step` the same way, wrapped in [`Construct::Remember`](super::Construct::Remember).
 
 use lgwks_deps::proc_macro2::TokenStream;
 
-use super::{Block, Bound, Code, Site};
+use super::{Block, Bound, Code, Duration, Site};
 
 /// `graph[, at most (limit) at once]:` and the `node`s under it.
 #[derive(Debug, Clone)]
@@ -203,5 +204,108 @@ impl Justify {
     #[must_use]
     pub const fn governed(&self) -> &Block {
         &self.governed
+    }
+}
+
+/// Who produced the bytes an `admit` reads: the particle after `from`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Producer {
+    /// `from model`: a model's output.
+    Model,
+    /// `from tool`: a tool's output.
+    Tool,
+    /// `from document`: a document's text.
+    Document,
+}
+
+/// `admit from <producer> through (<gate>):`: the block's value is the
+/// payload, admitted as a plan.
+#[derive(Debug, Clone)]
+pub struct Admit {
+    /// Where it stands in the script; read through `site()`.
+    pub(crate) site: Site,
+    /// The structural label of the admission's step.
+    pub(crate) label: String,
+    /// Who produced the payload.
+    pub(crate) producer: Producer,
+    /// The expression inside the written `( )`, of type `Gate`.
+    pub(crate) gate: TokenStream,
+    /// The block whose value is the payload's bytes.
+    pub(crate) payload: Block,
+}
+
+impl Admit {
+    /// The structural label of the admission's step.
+    #[must_use]
+    pub const fn label(&self) -> &str {
+        self.label.as_str()
+    }
+
+    /// Who produced the payload.
+    #[must_use]
+    pub const fn producer(&self) -> Producer {
+        self.producer
+    }
+
+    /// The expression inside the written `( )`, of type `Gate`.
+    #[must_use]
+    pub const fn gate(&self) -> &TokenStream {
+        &self.gate
+    }
+
+    /// The block whose value is the payload's bytes.
+    #[must_use]
+    pub const fn payload(&self) -> &Block {
+        &self.payload
+    }
+}
+
+/// `ready <pattern> from (<readiness>) within <duration>:`.
+#[derive(Debug, Clone)]
+pub struct Ready {
+    /// Where it stands in the script; read through `site()`.
+    pub(crate) site: Site,
+    /// The structural label of the wait's scope.
+    pub(crate) label: String,
+    /// The pattern the released value binds.
+    pub(crate) pattern: TokenStream,
+    /// The expression inside the written `( )`, of type `Readiness`.
+    pub(crate) readiness: TokenStream,
+    /// The longest the wait may take.
+    pub(crate) limit: Duration,
+    /// The body run once the readiness releases.
+    pub(crate) body: Block,
+}
+
+impl Ready {
+    /// The structural label of the wait's scope.
+    #[must_use]
+    pub const fn label(&self) -> &str {
+        self.label.as_str()
+    }
+
+    /// The pattern the released value binds.
+    #[must_use]
+    pub const fn pattern(&self) -> &TokenStream {
+        &self.pattern
+    }
+
+    /// The expression inside the written `( )`, of type `Readiness`.
+    #[must_use]
+    pub const fn readiness(&self) -> &TokenStream {
+        &self.readiness
+    }
+
+    /// The longest the wait may take.
+    #[must_use]
+    pub const fn limit(&self) -> &Duration {
+        &self.limit
+    }
+
+    /// The body run once the readiness releases.
+    #[must_use]
+    pub const fn body(&self) -> &Block {
+        &self.body
     }
 }

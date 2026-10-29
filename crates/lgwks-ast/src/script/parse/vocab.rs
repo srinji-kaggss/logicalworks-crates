@@ -1,5 +1,5 @@
 //! The structured words: `graph` and its `node`s, `saga` and its
-//! `compensate` lines, `whenever`, and `justify`.
+//! `compensate` lines, `whenever`, `justify`, `remember`, `admit` and `ready`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -11,11 +11,11 @@ use super::super::lines::{
 };
 use super::super::refuse;
 use super::super::tree::{
-    Block, Compensate, Construct, Graph, Justify, Node, Overflow, Site, Statement, Step, StepShape,
-    Whenever,
+    Admit, Block, Compensate, Construct, Graph, Justify, Node, Overflow, Producer, Ready, Site,
+    Statement, Step, StepShape, Whenever,
 };
 use super::super::{Refusal, Result};
-use super::words::{bound, refuse_typed_concurrency, rewrite, shape};
+use super::words::{bound, duration, refuse_typed_concurrency, rewrite, shape};
 use super::{Labels, Place, block};
 
 /// The largest buffer `whenever` takes: the bound `each` takes, for the same
@@ -222,12 +222,18 @@ fn refuse_unrunnable(line: &Line, nodes: &[Node]) -> Result<()> {
     }
 }
 
-/// `saga name:`: a named scope whose body may `compensate` its steps.
-pub(super) fn saga(
+/// `saga name:`, a named scope whose body may `compensate` its steps, or
+/// `remember name:`, a named scope whose value is recorded once per run.
+///
+/// One reader for both, because both are a one-word name over a body; a
+/// `saga`'s own body is the one place `compensate` stands.
+pub(super) fn named(
     line: &Line,
     children: &[LineNode],
     labels: &mut Labels,
+    kind: Kind,
 ) -> Result<(Construct, StepShape)> {
+    let word = kind.spelling();
     let name = match *after(&line.tokens, 1) {
         [ref only] => ident(only),
         _ => None,
@@ -235,20 +241,25 @@ pub(super) fn saga(
     let Some(name) = name else {
         return refuse_at(
             line,
-            "`saga` reads `saga <name>:`, where the name is one word",
-            "saga",
+            format!("`{word}` reads `{word} <name>:`, where the name is one word"),
+            word,
         );
     };
     let name = name.to_string();
     let label = labels.next(&name);
-    let (body, inner) = word_body(children, true)?;
-    let map = shape(Kind::Saga, name, text(&line.tokens), line, inner);
+    let (body, inner) = word_body(children, kind == Kind::Saga)?;
+    let map = shape(kind, name, text(&line.tokens), line, inner);
     let named = Step {
         site: Site::of(&map),
         label,
         body,
     };
-    Ok((Construct::Saga(named), map))
+    let construct = if kind == Kind::Saga {
+        Construct::Saga(named)
+    } else {
+        Construct::Remember(named)
+    };
+    Ok((construct, map))
 }
 
 /// `compensate step:` in a saga's own body, after the `step` it undoes.
@@ -425,4 +436,109 @@ pub(super) fn justify(
         governed,
     };
     Ok((Construct::Justify(block), map))
+}
+
+/// The producer `admit` names after `from`.
+fn producer_of(token: &TokenTree) -> Option<Producer> {
+    let name = ident(token)?.to_string();
+    match name.as_str() {
+        "model" => Some(Producer::Model),
+        "tool" => Some(Producer::Tool),
+        "document" => Some(Producer::Document),
+        _ => None,
+    }
+}
+
+/// `admit from <producer> through (<gate>):`, whose block's value is the
+/// payload.
+pub(super) fn admit(
+    line: &Line,
+    children: &[LineNode],
+    labels: &mut Labels,
+) -> Result<(Construct, StepShape)> {
+    let form = "`admit` reads `admit from model through (gate):`, or `from tool`, `from document`";
+    let (producer, gate) = match *after(&line.tokens, 1) {
+        [ref from, ref who, ref through, ref gate]
+            if is_ident(from, "from") && is_ident(through, "through") && is_parens(gate) =>
+        {
+            (producer_of(who), group(gate).map(|inner| inner.stream()))
+        }
+        _ => (None, None),
+    };
+    let Some(gate) = gate.filter(|stream| !stream.is_empty()) else {
+        return refuse_at(line, form, "admit");
+    };
+    let Some(producer) = producer else {
+        return refuse_at(
+            line,
+            "`admit` reads from one of three producers: `model`, `tool` or `document`",
+            "admit",
+        );
+    };
+    let label = labels.next("admit");
+    let (payload, inner) = word_body(children, false)?;
+    if payload.tail().is_none() {
+        return refuse_at(
+            line,
+            "the last line under `admit` is the payload's bytes, and this block ends without one",
+            "admit",
+        );
+    }
+    let subject = text(&gate.clone().into_iter().collect::<Vec<_>>());
+    let map = shape(Kind::Admit, subject, text(&line.tokens), line, inner);
+    let admitted = Admit {
+        site: Site::of(&map),
+        label,
+        producer,
+        gate,
+        payload,
+    };
+    Ok((Construct::Admit(admitted), map))
+}
+
+/// `ready <pattern> from (<readiness>) within <duration>:`.
+pub(super) fn ready(
+    line: &Line,
+    children: &[LineNode],
+    labels: &mut Labels,
+) -> Result<(Construct, StepShape)> {
+    let form = "`ready` reads `ready <name> from (readiness) within 30s:`";
+    let tokens = after(&line.tokens, 1);
+    let Some(at_from) = tokens.iter().position(|token| is_ident(token, "from")) else {
+        return refuse_at(line, form, "ready");
+    };
+    let (pattern, at_keyword) = tokens.split_at(at_from);
+    let (readiness, limit) = match *after(at_keyword, 1) {
+        [ref readiness, ref within, ref limit @ ..]
+            if is_parens(readiness) && is_ident(within, "within") && !limit.is_empty() =>
+        {
+            (group(readiness).map(|inner| inner.stream()), limit)
+        }
+        _ => {
+            return refuse_at(
+                line,
+                "a `ready` waits under a deadline: `ready <name> from (readiness) within 30s:`",
+                "ready",
+            );
+        }
+    };
+    let Some(readiness) = readiness.filter(|stream| !stream.is_empty()) else {
+        return refuse_at(line, form, "ready");
+    };
+    if pattern.is_empty() {
+        return refuse_at(line, form, "ready");
+    }
+    let deadline = duration(limit, line)?;
+    let label = labels.next("ready");
+    let (body, inner) = word_body(children, false)?;
+    let map = shape(Kind::Ready, text(limit), text(&line.tokens), line, inner);
+    let waited = Ready {
+        site: Site::of(&map),
+        label,
+        pattern: pattern.iter().cloned().collect::<TokenStream>(),
+        readiness,
+        limit: deadline,
+        body,
+    };
+    Ok((Construct::Ready(waited), map))
 }

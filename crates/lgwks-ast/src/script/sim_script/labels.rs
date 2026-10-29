@@ -74,9 +74,17 @@ fn construct_labels(construct: &Construct, out: &mut Vec<String>) {
             out.push(again.label().to_owned());
             block_labels(again.body(), out);
         }
-        Construct::Step(ref step) | Construct::Saga(ref step) => {
+        Construct::Step(ref step) | Construct::Saga(ref step) | Construct::Remember(ref step) => {
             out.push(step.label().to_owned());
             block_labels(step.body(), out);
+        }
+        Construct::Admit(ref admitted) => {
+            out.push(admitted.label().to_owned());
+            block_labels(admitted.payload(), out);
+        }
+        Construct::Ready(ref waited) => {
+            out.push(waited.label().to_owned());
+            block_labels(waited.body(), out);
         }
         Construct::Graph(ref declared) => {
             out.push(declared.label().to_owned());

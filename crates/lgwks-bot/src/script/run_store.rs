@@ -30,7 +30,7 @@ use crate::effect::RunId;
 use crate::rt::task_local;
 use crate::task::{DefinitionIdentity, Drift};
 
-use super::{FlowError, Scope, StepKey};
+use super::{FlowError, Scope, Site, StepKey};
 
 /// The bound a step's value must satisfy to be a durable step's result.
 ///
@@ -712,6 +712,34 @@ where
     // above it still records something that is stable for its own run.
     let definition = step_definition(scope, step);
     step_in(&child, &definition, body).await
+}
+
+/// [`remember`] for a `remember name:` that `script!` wrote at `site`.
+///
+/// The block is handed the step's own scope, so what it runs is keyed and
+/// located under the step, and the trail entry carries `site`. Called by
+/// `script!`.
+///
+/// # Errors
+///
+/// As [`remember`], located at the step.
+pub async fn remembered_at<T, F, Fut>(
+    scope: &Scope,
+    step: &str,
+    site: &'static Site,
+    body: F,
+) -> Result<T, FlowError>
+where
+    T: lgwks_std::wire::Archive + Durable,
+    F: FnOnce(Scope) -> Fut,
+    Fut: Future<Output = Result<T, FlowError>>,
+{
+    let child = scope.enter_at(step, site)?;
+    let definition = step_definition(scope, step);
+    let inner = child.clone();
+    let outcome = step_in(&child, &definition, move || body(inner)).await;
+    child.settle(&outcome);
+    outcome.map_err(|error| error.located(&child))
 }
 
 /// The definition a step records under when no host installed one.

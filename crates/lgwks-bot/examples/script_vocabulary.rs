@@ -2,20 +2,25 @@
 //! compensation, streams and typed domains, driven end to end.
 //!
 //! Each flow below says one of the structured words, `justify`, `saga`,
-//! `graph` and `whenever`, and runs it through the public interface: a
-//! justification WAF that stops a run with its reason code, a needs-ordered
-//! lane graph whose failure blocks only downstream, compensations that undo in
-//! reverse order, a bounded live feed, and typed observe/act calls against a
-//! stub registry. `main` runs every
+//! `graph`, `whenever`, `remember`, `admit` and `ready`, and runs it through
+//! the public interface: a justification WAF that stops a run with its reason
+//! code, a needs-ordered lane graph whose failure blocks only downstream,
+//! compensations that undo in reverse order, a bounded live feed, a remembered
+//! step, untrusted bytes admitted as a plan, a wait on a service's readiness,
+//! and typed observe/act calls against a stub registry. `main` runs every
 //! flow, checks what each one reports, and prints the trail.
 
 use std::error::Error;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use lgwks_bot::cap::Cap;
+use lgwks_bot::proposal::{Decoder, LedgerLimits, PlanBudget, PlanLimits, Surface};
 use lgwks_bot::script::{
-    FlowError, GraphNode, GraphReport, Justify, NodeOutcome, Overflow, PumpReport, Scope,
-    StreamGate, Tenant, TypedAction, TypedSource, act_typed, map_domain, observe_typed,
+    FlowError, Gate, Generation, GraphNode, GraphReport, Justify, NodeOutcome, Overflow,
+    PumpReport, Readiness, Scope, StreamGate, Tenant, TypedAction, TypedSource, act_typed,
+    map_domain, observe_typed,
 };
 use lgwks_bot::task::{Host, task};
 use lgwks_bot::{Action, Auth, BotError, Execute, GrantSet, Observe, Source, domains};
@@ -194,6 +199,39 @@ lgwks_bot::script! {
         let report = whenever price in next_batch(feed), buffering 4, drop oldest:
             price
         give back report
+
+    /// Quote once per run: a resumed run reads the quote back.
+    flow quote(asked: &AtomicU32) -> u32:
+        let price = remember quote:
+            asked.fetch_add(1, Ordering::SeqCst).saturating_add(40)
+        give back price
+
+    /// Admit a model's reply as a plan before anything acts on it.
+    flow proposal(gate: &Gate, reply: &[u8]) -> usize:
+        let plan = admit from model through (gate):
+            reply
+        give back plan.wanted().len()
+
+    /// Wait for the pool, under a deadline, then size it.
+    flow pooled(db: &Readiness<u32>) -> u32:
+        let size = ready pool from (db) within 30s:
+            pool.awaited().saturating_add(0)
+        give back size
+}
+
+/// A gate over a surface with one read operation, for the `admit` flow.
+fn proposal_gate() -> Result<Gate, Box<dyn Error>> {
+    let surface = Surface::builder("demo")?
+        .operation("read-report", &[Cap::fs()])?
+        .holding(&[Cap::fs()])
+        .build();
+    Ok(Gate::new(
+        "demo",
+        surface,
+        Decoder::new(PlanLimits::default()),
+        PlanBudget::new(4),
+        LedgerLimits::new(3, 8),
+    ))
 }
 
 /// Run every vocabulary flow, check what each one reports, and print the trail.
@@ -267,6 +305,29 @@ fn main() -> Result<(), Box<dyn Error>> {
         out,
         "stream: handled {} dropped {} refused {}",
         feed.handled, feed.dropped, feed.refused
+    )
+    .map_err(|error| format!("the report was not written: {error}"))?;
+
+    let asked = AtomicU32::new(0);
+    let price = lgwks_bot::block_on(quote(&scope, &asked)).map_err(|error| format!("{error}"))?;
+    check(price == 40, "the remembered step gives its value")?;
+    check(asked.load(Ordering::SeqCst) == 1, "the block ran once")?;
+    let gate = proposal_gate()?;
+    let wanted = lgwks_bot::block_on(proposal(&scope, &gate, b"op=read-report\n"))
+        .map_err(|error| format!("{error}"))?;
+    check(wanted == 1, "the admitted plan wants its one operation")?;
+    let refused = lgwks_bot::block_on(proposal(&scope, &gate, b"op=install-dependency\n"));
+    check(
+        matches!(refused, Err(FlowError::Refused { .. })),
+        "an unregistered operation is refused",
+    )?;
+    let db: Readiness<u32> = Readiness::new("pool")?;
+    db.ready(Generation::FIRST, 8)?;
+    let size = lgwks_bot::block_on(pooled(&scope, &db)).map_err(|error| format!("{error}"))?;
+    check(size == 8, "the wait is released with the pool")?;
+    writeln!(
+        out,
+        "durable: remembered {price}, admitted {wanted} operation, pool of {size}"
     )
     .map_err(|error| format!("the report was not written: {error}"))?;
 

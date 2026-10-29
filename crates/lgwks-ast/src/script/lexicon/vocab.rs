@@ -1,5 +1,6 @@
 //! The structured words' rows: `graph` and `node`, `saga` and `compensate`,
-//! `whenever`, and `justify` (#649, #651, #653, #654, #657, #694).
+//! `whenever`, and `justify` (#649, #651, #653, #654, #657, #694), and the
+//! step words `remember`, `admit` and `ready` (ADR 0008).
 //!
 //! Each is a capability the runtime already had, now reached through
 //! `script!` alone: the words are read here and nowhere else, and each
@@ -243,4 +244,84 @@ pub(super) const JUSTIFY: Word = block(
         ),
     ],
     "flow sync(api: &Api, rules: &Justify) -> u16:\n    let code = justify with (rules):\n        step call:\n            api.call().await.or_fail()?\n    give back code\n",
+);
+
+/// The simulation file for `remember`, `admit` and `ready`.
+const STEP_WORD_SIMS: &str = "crates/lgwks-bot/tests/it/sim_script_durable.rs";
+
+/// A guarantee proved by a family in [`STEP_WORD_SIMS`].
+const fn durable_sim(axis: Axis, claim: &'static str, test: &'static str) -> Guarantee {
+    script_sim_in(STEP_WORD_SIMS, axis, claim, test)
+}
+
+/// `remember name:`.
+pub(super) const REMEMBER: Word = block(
+    Kind::Remember,
+    "`remembered_at`",
+    &[form(
+        "`remember name:`",
+        "the block once per run; a resume reads its value back",
+    )],
+    &["a name that is not one word"],
+    &[
+        durable_sim(
+            Axis::Ephemeral,
+            "a resume replays the value, never the block",
+            "remember_replays_on_resume",
+        ),
+        refused(
+            Axis::Idiomatic,
+            "a nameless `remember` is refused",
+            "remember with no name",
+        ),
+    ],
+    "flow ask(model: &Model) -> String:\n    let reply = remember ask:\n        model.ask().await.or_retry()?\n    give back reply\n",
+);
+
+/// `admit from <producer> through (gate):`.
+pub(super) const ADMIT: Word = block(
+    Kind::Admit,
+    "`admit_at`",
+    &[form(
+        "`admit from model through (gate):` (or `tool`, `document`)",
+        "the block's bytes admitted as a `Plan`; a refusal fails the step",
+    )],
+    &["a producer other than `model`, `tool`, `document`"],
+    &[
+        durable_sim(
+            Axis::Decoupled,
+            "a refusal is typed, at the step, with its provenance",
+            "admit_refusal_located",
+        ),
+        refused(
+            Axis::Idiomatic,
+            "an `admit` with no gate is refused",
+            "admit with no gate",
+        ),
+    ],
+    "flow plan(reply: &[u8], gate: &Gate) -> usize:\n    let plan = admit from model through (gate):\n        reply\n    give back plan.wanted().len()\n",
+);
+
+/// `ready <pattern> from (readiness) within <duration>:`.
+pub(super) const READY: Word = block(
+    Kind::Ready,
+    "`Readiness::wait`",
+    &[form(
+        "`ready x from (readiness) within 30s:`",
+        "the block once `readiness` is signalled, `x` bound to it",
+    )],
+    &["a `ready` with no `within`"],
+    &[
+        durable_sim(
+            Axis::Hyperscale,
+            "released by the signal, never a poll; `TimedOut` past the deadline",
+            "ready_released_or_timed_out",
+        ),
+        refused(
+            Axis::Idiomatic,
+            "a `ready` with no deadline is refused",
+            "ready with no deadline",
+        ),
+    ],
+    "flow rows(db: &Readiness<Pool>) -> u64:\n    let n = ready pool from (db) within 30s:\n        pool.awaited().count()\n    give back n\n",
 );

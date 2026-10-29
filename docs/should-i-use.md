@@ -1,9 +1,9 @@
 # Should I use logicalworks-crates?
 
 `logicalworks-crates` is the Rust repository of Logical Works Incorporated: six
-independently versioned crates, each usable alone (`lgwks_std` 3.2.1, `lgwks_bot`
-6.0.0, `lgwks_ast` 4.0.0, `lgwks_macros` 1.2.0, `lgwks_deps` 5.1.1 and `drishti`
-0.0.1 in this tree). It is not a framework and not a rewrite of the
+independently versioned crates, each usable alone (`lgwks_std` 3.2.2, `lgwks_bot`
+6.1.0, `lgwks_ast` 4.1.0, `lgwks_macros` 1.3.0, `lgwks_deps` 5.1.2 and `drishti`
+0.1.0 in this tree). It is not a framework and not a rewrite of the
 ecosystem: it is the layer where a program's authority, its dependency graph and
 its code reading are decided once instead of in every project.
 
