@@ -48,9 +48,9 @@ crates/lgwks-bot/src/language.rs:580	/// Creates a resolver pre-loaded with lear
 crates/lgwks-bot/src/language.rs:611	pub fn learn(&mut self, question: &str, utterance: &str, option: &str) -> Option<Alias> {
 crates/lgwks-bot/src/language.rs:616	.insert(alias.utterance.clone(), alias)
 crates/lgwks-bot/src/language.rs:649	pub fn aliases(&self) -> Vec<Alias> {
-crates/lgwks-bot/src/rt/mod.rs:83	//! This is not a scheduler with realtime guarantees. Future completion order
-crates/lgwks-bot/src/rt/mod.rs:110	#[cfg(feature = "sync")]
-crates/lgwks-bot/src/rt/mod.rs:122	#[cfg(all(feature = "signal", any(unix, windows)))]
+crates/lgwks-bot/src/rt/mod.rs:85	//! This is not a scheduler with realtime guarantees. Future completion order
+crates/lgwks-bot/src/rt/mod.rs:112	#[cfg(feature = "sync")]
+crates/lgwks-bot/src/rt/mod.rs:126	#[cfg(all(feature = "signal", any(unix, windows)))]
 crates/lgwks-bot/src/rt/process.rs:66	Capture(NonZeroUsize),
 crates/lgwks-bot/src/rt/process.rs:707	pub struct ProcessRun {
 crates/lgwks-bot/src/rt/process.rs:827	pub enum ProcessRunError {

@@ -41,11 +41,12 @@
 "crates/lgwks-bot/src/domain/net.rs" = 9
 "crates/lgwks-bot/src/domain/notify.rs" = 6
 "crates/lgwks-bot/src/domain/sys.rs" = 14
-"crates/lgwks-bot/src/ecs.rs" = 19
+"crates/lgwks-bot/src/ecs.rs" = 20
 "crates/lgwks-bot/src/ecs/bot.rs" = 13
 "crates/lgwks-bot/src/ecs/bot_run.rs" = 2
 "crates/lgwks-bot/src/ecs/builder.rs" = 12
 "crates/lgwks-bot/src/ecs/profile.rs" = 11
+"crates/lgwks-bot/src/ecs/requests.rs" = 11
 "crates/lgwks-bot/src/ecs/resources.rs" = 20
 "crates/lgwks-bot/src/ecs/runs.rs" = 9
 "crates/lgwks-bot/src/ecs/scope.rs" = 9
@@ -89,10 +90,11 @@
 "crates/lgwks-bot/src/retry.rs" = 27
 "crates/lgwks-bot/src/review.rs" = 26
 "crates/lgwks-bot/src/rt/cancel.rs" = 10
+"crates/lgwks-bot/src/rt/edge.rs" = 6
 "crates/lgwks-bot/src/rt/estate.rs" = 22
 "crates/lgwks-bot/src/rt/fs.rs" = 1
 "crates/lgwks-bot/src/rt/io.rs" = 1
-"crates/lgwks-bot/src/rt/mod.rs" = 14
+"crates/lgwks-bot/src/rt/mod.rs" = 15
 "crates/lgwks-bot/src/rt/net.rs" = 6
 "crates/lgwks-bot/src/rt/process.rs" = 46
 "crates/lgwks-bot/src/rt/process/confine.rs" = 25

@@ -75,6 +75,11 @@ net = ["io", "lgwks_deps/tokio-net", "lgwks_std/random", "lgwks_std/http"]
 # `Child::kill` cannot do); this enables it, and adds no dependency.
 process = ["io", "sync", "time", "lgwks_std/process", "lgwks_deps/tokio-process"]
 fs = ["io", "lgwks_deps/tokio-fs"]
+# `edge`: the driver's HTTP ingress (ADR 0006 R4). axum, registered under
+# `lgwks_deps`, carries the connection and the router; the world's request
+# system answers every request from its tenant's state. Host-only like `net`,
+# which it carries, so it is not on the WASI default set.
+edge = ["net", "sync", "ecs", "lgwks_deps/axum"]
 signal = ["rt", "lgwks_deps/tokio-signal"]
 # `inspect`: typed in-process structural code inspection (R8). Host-only, like
 # `process`/`fs`/`net`: it pulls the native tree-sitter grammars through
@@ -154,6 +159,7 @@ full = [
     "net",
     "process",
     "fs",
+    "edge",
     "signal",
     "ephemeral",
     "script",
@@ -295,6 +301,11 @@ required-features = ["script"]
 name = "guarantees"
 path = "examples/guarantees.rs"
 required-features = ["script", "ephemeral"]
+
+[[bin]]
+name = "edge-load"
+path = "src/bin/edge_load.rs"
+required-features = ["edge", "ephemeral"]
 
 [[bin]]
 name = "estate"

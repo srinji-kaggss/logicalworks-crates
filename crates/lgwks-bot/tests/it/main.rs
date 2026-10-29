@@ -168,6 +168,8 @@ mod durable_crash_group_commit;
 mod durable_crash_observation;
 #[cfg(all(feature = "ecs", feature = "wire"))]
 mod durable_dispatch;
+#[cfg(all(feature = "edge", feature = "ephemeral"))]
+mod edge;
 #[cfg(all(feature = "ecs", feature = "wire"))]
 mod effect_identity;
 #[cfg(all(feature = "ecs", feature = "wire"))]

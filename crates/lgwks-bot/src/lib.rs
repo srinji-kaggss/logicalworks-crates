@@ -487,6 +487,9 @@ pub use ecs::{
     DEFAULT_POLL_DEADLINE, ForcedRefresh, MAX_POLL_DEADLINE, RunCounts, RunFeed, RunOutcome,
     SettledRun, StalledSource, SupersededObservation, TickReport,
 };
+#[doc(hidden)]
+#[cfg(feature = "edge")]
+pub use ecs::{Request, RequestCounts, RequestFeed, Response};
 /// The per-stage tick profiler (feature `profile`): six named stages and the
 /// measured time each spent.
 ///

@@ -23,15 +23,12 @@ with speed being the biggest blindspot".
 
 Read from the code on 2026-10-26:
 
-- None of ADR 0005's steps landed. `EcsBot::world()` is still public (`ecs/bot.rs`), there is no
-  `core_boundary` test, no wake handle, and no admitted or settled run event reaches the world.
-- After ADR 0005 was accepted, #734 made `rt::Runtime` the orchestration front door and #735 assembled
-  `rt::Estate` from `Host`, `Supervisor` and `Runtime`. Neither touches the ECS world. That is the
-  design ADR 0005 rejected ("tokio and `rt` as the glue").
-- A process can hold several runtimes at once: `rt::Runtime`, the host's lazily built reactor
-  (`task::host`), the estate's own runtime, and the current-thread runtime `rt::block_on` builds per call.
-- ADR 0005's Verification called its boundary `review only` until R1 landed. R1 never landed, so
-  nothing refused the drift. The missing gate is the cause.
+- None of ADR 0005's steps landed: `EcsBot::world()` is public, no `core_boundary` test, no wake
+  handle, no admitted or settled run event reaches the world.
+- #734 made `rt::Runtime` the front door and #735 built `rt::Estate` from `Host`, `Supervisor` and
+  `Runtime`, neither touching the world: the "tokio and `rt` as the glue" ADR 0005 rejected.
+- A process can hold several runtimes: `rt::Runtime`, the host's lazy reactor, the estate's own, and
+  one per `rt::block_on` call. ADR 0005's boundary was `review only` until R1, which never landed.
 
 ## Decision
 
@@ -39,8 +36,8 @@ Read from the code on 2026-10-26:
    settled, an effect dispatched or settled, a timer firing: each is an event written to that world.
    Systems decide; effects leave through the journal (`docs/effect-kernel.md`).
 2. **One driver, built on tokio and axum.** A process holds one tokio runtime, owned by the driver.
-   axum is the driver's HTTP edge: a request becomes an event in the world and its response is the
-   effect the world settles. `Host`, `Supervisor`, `Estate` and every verb run on that one driver and
+   axum is the driver's HTTP edge: the world's request system answers each request from its
+   tenant's state (R4). `Host`, `Supervisor`, `Estate` and every verb run on that one driver and
    never build a runtime of their own.
 3. **tokio and axum only where rebuilding makes no sense.** tokio's reactor, timers and I/O and
    axum's router and extractors are used as they are, behind `rt`; ADR 0005's owned readiness loop
@@ -78,12 +75,10 @@ Each step lands alone and green.
 
 ## Alternatives rejected
 
-- **An owned reactor in place of tokio (ADR 0005).** Rebuilds every low-level async function for no
-  gain the Director asked for; tokio is the driver.
+- **An owned reactor in place of tokio (ADR 0005).** Rebuilds every low-level async function.
 - **tokio and `rt` as the glue, as #734 and #735 left it.** The world becomes one consumer among
   several and stops driving anything.
-- **A runtime per owner, as today.** Several reactors compete for the same cores and none of them
-  carries the world's events.
+- **A runtime per owner.** Several reactors compete for the cores and none carries the world's events.
 
 ## Consequences
 
@@ -106,15 +101,20 @@ use; `Host`, `Estate` and `rt::block_on` take its handle. `one_driver_tests::one
 builds an estate, runs a host and ticks a bot, and counts the runtimes `Builder::build` made: one or
 none; `sim_one_driver` draws that schedule from a seed across four tenants. R2 changes no feature.
 
-R3 landed 2026-10-29. `ecs::RunFeed` writes a run's `admitted` rung, then its `settled` rungs as one
-batch, through an `EffectJournal`; `Host::builder(..).runs(feed)` and `Supervisor::with_runs(feed)`
-feed it, and `RunFeed::bind(&mut bot, ..)` fires the bound system once per settled run next tick, one
-handled batch per tick. `tests/it/run_events.rs`: 100 host runs and 100 supervised tasks each leave
-100 `admitted`, 100 `settled` and 100 fires, a reopen fires none, and a child `SIGKILL`ed after 50
-settlements reopens to 50 fires, then 0; `sim_run_events` holds exactly-once firing over 512 seeds.
-`examples/run_events_cost.rs` (release, 1,000 runs, RSS 13.4 MB), p50/p95/p99: a host run 1/1/2 µs
-before, 3/4/9 µs on a memory feed, 5.0/7.4/8.1 ms on a file feed (two syncs); settled to fired
-2/2/4 µs in memory, 2.9/3.9/4.4 ms durable.
+R3 landed 2026-10-29. `ecs::RunFeed` writes a run's `admitted` rung, then its `settled` rungs, through
+an `EffectJournal`; `Host::builder(..).runs(feed)` and `Supervisor::with_runs(feed)` feed it;
+`RunFeed::bind(&mut bot, ..)` fires the bound system once per settled run next tick. `tests/it/run_events.rs`:
+100 host runs and 100 supervised tasks each leave 100 `admitted`, `settled` and fires, a reopen fires
+none, a child `SIGKILL`ed after 50 settlements reopens to 50 fires, then 0; `sim_run_events` holds it
+over 512 seeds. `examples/run_events_cost.rs` p50/p95/p99: a host run 1/1/2 µs before, 3/4/9 µs after.
 
-Decisions 6 and 7 stay `review only` until the `script` drift test lands, owner the executing agent
-of each step, dated 2026-10-26. The `doc-governance` lane holds this record's shape.
+R4 landed 2026-10-29. `rt::edge::serve` runs axum on the driver; `ecs::RequestFeed`, the world's request
+system, answers `/t/{tenant}/…` from that tenant's state in 64 lock-striped partitions, on the worker
+that read it. A queue to the world thread was built first and measured 143k req/s to axum's 167k, so it
+did not land (decision 8). `tests/it/edge.rs` drives two tenants over HTTP; `sim_requests` holds
+isolation, no lost update over 16 threads, a panicking handler and the tenant ceiling over 1,000 seeds.
+`edge-load`, 256k posts, 16 tenants, 3 rounds, world vs axum (same ceiling) vs Loco 1.2.0: c=64 166–168k,
+153–165k, 149–150k req/s; c=1024 161–163k, 158–159k, 145k; CPU 4.0–4.1, 4.4–4.7, 6.3–6.7 s; RSS 8.2, 8.6, 19.2 MB.
+
+Decisions 6 and 7 stay `review only` until the `script` drift test lands (owner: the executing agent,
+2026-10-26). The `doc-governance` lane holds this record's shape.

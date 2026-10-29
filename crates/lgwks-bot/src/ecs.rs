@@ -194,6 +194,10 @@ mod entry;
 mod fold;
 #[cfg(feature = "ecs")]
 mod ledger;
+// Requests into the world: the HTTP edge's events (ADR 0006 R4). Gated with
+// the edge, its one producer.
+#[cfg(feature = "edge")]
+mod requests;
 #[cfg(feature = "ecs")]
 mod resources;
 // Runs into the world: the admitted and settled events (ADR 0006 R3).
@@ -217,6 +221,8 @@ pub use builder::EcsBuilder;
 #[cfg(feature = "ecs")]
 pub use builder::EcsObserveBuilder;
 pub use lgwks_std::retry::RetryPolicy;
+#[cfg(feature = "edge")]
+pub use requests::{Request, RequestCounts, RequestFeed, Response};
 #[cfg(feature = "ecs")]
 pub use resources::ForcedRefresh;
 #[cfg(feature = "ecs")]
