@@ -745,6 +745,9 @@ mod start;
 mod supervisor;
 #[cfg(test)]
 mod tests;
+/// Supervised runs into the world's run feed (ADR 0006 R3).
+#[cfg(feature = "ecs")]
+mod world;
 
 pub use self::outcome::{CleanupReceipt, TaskOutcome};
 #[cfg(feature = "process")]

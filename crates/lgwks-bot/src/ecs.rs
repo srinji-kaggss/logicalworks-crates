@@ -196,6 +196,9 @@ mod fold;
 mod ledger;
 #[cfg(feature = "ecs")]
 mod resources;
+// Runs into the world: the admitted and settled events (ADR 0006 R3).
+#[cfg(feature = "ecs")]
+mod runs;
 #[cfg(feature = "ecs")]
 mod watchdog;
 // The admitted-input identity the registry derives for `script` and
@@ -222,6 +225,10 @@ pub use resources::StalledSource;
 pub use resources::SupersededObservation;
 #[cfg(feature = "ecs")]
 pub use resources::TickReport;
+#[cfg(feature = "ecs")]
+pub use runs::{RunCounts, RunFeed, RunOutcome, SettledRun};
+#[cfg(feature = "ecs")]
+pub(crate) use runs::{RunFeedError, RunTicket};
 #[cfg(feature = "ecs")]
 pub use scope::EffectScope;
 #[cfg(all(feature = "ecs", feature = "ephemeral"))]

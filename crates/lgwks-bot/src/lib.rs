@@ -484,8 +484,8 @@ pub use cap::{Auth, Cap, Deficit, Demand, Shortage};
 #[doc(hidden)]
 #[cfg(feature = "ecs")]
 pub use ecs::{
-    DEFAULT_POLL_DEADLINE, ForcedRefresh, MAX_POLL_DEADLINE, StalledSource, SupersededObservation,
-    TickReport,
+    DEFAULT_POLL_DEADLINE, ForcedRefresh, MAX_POLL_DEADLINE, RunCounts, RunFeed, RunOutcome,
+    SettledRun, StalledSource, SupersededObservation, TickReport,
 };
 /// The per-stage tick profiler (feature `profile`): six named stages and the
 /// measured time each spent.

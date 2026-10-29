@@ -22,8 +22,8 @@ crates/lgwks-bot/src/cap.rs:526	pub fn check(&self, required: &[Cap]) -> Result<
 crates/lgwks-bot/src/domain/sys.rs:43	/// rest is drained and counted, never retained.
 crates/lgwks-bot/src/ecs/admit.rs:344	RetryClass::Never => EntryState::Abandoned {
 crates/lgwks-bot/src/ecs/bot.rs:304	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs/bot.rs:374	let (fired, failure) = self.run_steps(&steps, &mut failures, &retry).await;
-crates/lgwks-bot/src/ecs/bot.rs:483	pub fn tick(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs/bot.rs:378	let (fired, failure) = self.run_steps(&steps, &mut failures, &retry).await;
+crates/lgwks-bot/src/ecs/bot.rs:487	pub fn tick(&mut self) -> Result<usize, BotError> {
 crates/lgwks-bot/src/ecs/builder.rs:610	let mut shortages: Vec<Shortage> = Vec::new();
 crates/lgwks-bot/src/ecs/builder.rs:630	world.insert_resource(Grants(grants.clone()));
 crates/lgwks-bot/src/ecs/fold.rs:377	pub(super) fn fire_plan(world: &mut World) {
@@ -68,7 +68,7 @@ crates/lgwks-bot/src/rt/supervise/repeat.rs:168	token.run_until_cancelled(body(i
 crates/lgwks-bot/src/rt/supervise/run.rs:95	pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
 crates/lgwks-bot/src/rt/supervise/run.rs:134	pub async fn spawn_process_identified(
 crates/lgwks-bot/src/rt/supervise/run.rs:332	pub async fn run_process(&mut self, spec: &ProcessSpec) -> Result<ProcessRun, ProcessRunError> {
-crates/lgwks-bot/src/rt/supervise/supervisor.rs:247	pub fn new(max_in_flight: usize) -> Self {
+crates/lgwks-bot/src/rt/supervise/supervisor.rs:250	pub fn new(max_in_flight: usize) -> Self {
 crates/lgwks-bot/src/rt/supervise/tests.rs:1	//! The supervisor's unit tests: the shared seams and helpers, and one module per concern.
 crates/lgwks-bot/src/rt/task.rs:170	pub async fn join_all_bounded<F, T>(limit: usize, futures: impl IntoIterator<Item = F>) -> Vec<T>
 crates/lgwks-bot/src/semantic.rs:13	//! This tier is consulted only when the lexicon returns [`Resolution::Absent`] —

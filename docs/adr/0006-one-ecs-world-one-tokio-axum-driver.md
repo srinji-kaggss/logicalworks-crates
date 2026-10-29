@@ -90,8 +90,6 @@ Each step lands alone and green.
 - R1 and R2 remove public items (`EcsBot::world`, the private runtimes behind `Host` and `Estate`):
   major bumps, no shim.
 - axum becomes a registered `lgwks_deps` edge, on by default under ADR 0003.
-- The `--no-default-features` build without tokio, which ADR 0005 protected, is now a driver choice
-  to be re-decided in R2, not a constraint on it.
 
 ## Correspondence
 
@@ -100,21 +98,23 @@ Supersedes ADR 0005. Builds on `docs/bevy-admission.md`, `docs/bot-on-ecs.md` an
 
 ## Verification
 
-`tests/it/core_boundary.rs` holds decision 4 (R1, landed with this record:
-`the_core_names_no_driver_and_only_ecs_names_bevy` reads every production file,
-`a_planted_driver_import_in_the_core_is_refused` is the falsifier).
+`tests/it/core_boundary.rs` holds decision 4 (R1: `the_core_names_no_driver_and_only_ecs_names_bevy`
+reads every production file, `a_planted_driver_import_in_the_core_is_refused` is the falsifier).
 
 Decision 2 is held by R2, landed 2026-10-28. `rt::runtime::driver` builds the one runtime on first
-use; `Host`, `Estate` and `rt::block_on` take its handle, and the host's reactor and the estate's
-runtime are gone. `rt::runtime::one_driver_tests::one_process_holds_one_driver` builds an estate,
-runs a host, ticks a bot and blocks on futures, and counts the runtimes `Builder::build` made on
-that thread: one or none. `sim_one_driver::sim_every_door_in_any_order_shares_one_driver` draws
-that schedule from a seed across four tenants. Counting builds replaces counting worker threads,
-because a build is what makes a runtime. The estate smoke binary (`src/bin/estate.rs`) runs on the
-estate's driver. Tests that need one thread build their own current-thread runtime by name
-(`Builder::current_thread`, crate-private). The driver stays inside `rt`, behind the `rt` feature;
-R2 changes no feature, so a build without `rt` compiles what it compiled before.
+use; `Host`, `Estate` and `rt::block_on` take its handle. `one_driver_tests::one_process_holds_one_driver`
+builds an estate, runs a host and ticks a bot, and counts the runtimes `Builder::build` made: one or
+none; `sim_one_driver` draws that schedule from a seed across four tenants. R2 changes no feature.
 
-Decisions 6, 7 and 8 stay `review only` until the `script` drift test and R5's printed numbers
-land, owner the executing agent of each step, dated 2026-10-26. The `doc-governance` lane holds
-this record's shape.
+R3 landed 2026-10-29. `ecs::RunFeed` writes a run's `admitted` rung, then its `settled` rungs as one
+batch, through an `EffectJournal`; `Host::builder(..).runs(feed)` and `Supervisor::with_runs(feed)`
+feed it, and `RunFeed::bind(&mut bot, ..)` fires the bound system once per settled run next tick, one
+handled batch per tick. `tests/it/run_events.rs`: 100 host runs and 100 supervised tasks each leave
+100 `admitted`, 100 `settled` and 100 fires, a reopen fires none, and a child `SIGKILL`ed after 50
+settlements reopens to 50 fires, then 0; `sim_run_events` holds exactly-once firing over 512 seeds.
+`examples/run_events_cost.rs` (release, 1,000 runs, RSS 13.4 MB), p50/p95/p99: a host run 1/1/2 µs
+before, 3/4/9 µs on a memory feed, 5.0/7.4/8.1 ms on a file feed (two syncs); settled to fired
+2/2/4 µs in memory, 2.9/3.9/4.4 ms durable.
+
+Decisions 6 and 7 stay `review only` until the `script` drift test lands, owner the executing agent
+of each step, dated 2026-10-26. The `doc-governance` lane holds this record's shape.

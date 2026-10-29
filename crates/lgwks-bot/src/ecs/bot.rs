@@ -303,6 +303,10 @@ impl EcsBot {
     /// [`BotError::PendingTransition`] when nothing failed and work is still held.
     pub async fn tick_async(&mut self) -> Result<usize, BotError> {
         self.begin_tick();
+        // Runs settled since the last tick reach the world first (ADR 0006
+        // R3): the bound system fires before the sources are polled, so what a
+        // run settled is in the world this tick decides on.
+        self.fire_settled()?;
 
         // The staging buffers are moved out, refilled and put back, so the
         // observation phase reuses one allocation across every tick rather than

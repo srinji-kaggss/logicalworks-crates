@@ -484,6 +484,10 @@ impl Supervisor {
         Fut: Future<Output = TaskEnd> + Send + 'static,
     {
         self.spawned = self.spawned.saturating_add(1);
+        // Admitted into the world before the task can end, so its settlement
+        // always finds the ticket.
+        #[cfg(feature = "ecs")]
+        self.admit_world_run(task);
         let handle = self.set.spawn(future);
         self.identities.insert(handle.id(), task);
         task
@@ -629,6 +633,8 @@ impl Supervisor {
             self.reports_dropped = self.reports_dropped.saturating_add(1);
             return;
         };
+        #[cfg(feature = "ecs")]
+        self.settle_world_run(&outcome);
         match retention {
             Retention::Capped if self.reports.len() >= self.report_cap => {
                 self.reports_dropped = self.reports_dropped.saturating_add(1);

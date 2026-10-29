@@ -104,6 +104,10 @@ mod resume_fixtures;
 #[path = "../support/liveness.rs"]
 mod liveness_fixtures;
 
+#[cfg(feature = "script")]
+#[path = "../support/run_world.rs"]
+mod run_world;
+
 #[path = "../support/scratch.rs"]
 mod scratch;
 
@@ -225,6 +229,8 @@ mod rt_process;
 mod rt_process_files;
 mod rt_process_stdin;
 mod rt_runtime_stack;
+#[cfg(feature = "script")]
+mod run_events;
 mod script_domains;
 mod script_flow;
 #[cfg(feature = "script")]
@@ -302,6 +308,8 @@ mod sim_review_pr;
 #[cfg(all(feature = "rt", feature = "time", feature = "sync"))]
 mod sim_rt_front_door;
 mod sim_run_boundaries;
+#[cfg(feature = "script")]
+mod sim_run_events;
 #[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_scale;
 mod sim_script;

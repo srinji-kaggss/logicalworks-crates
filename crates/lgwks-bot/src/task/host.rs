@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use lgwks_std::hash::{Digest, Hasher};
 
+use crate::ecs::RunFeed;
 use crate::effect::RunId;
 use crate::gate::GrantSet;
 use crate::registry::DomainRegistry;
@@ -124,6 +125,8 @@ pub(super) struct Installation {
     pub(super) repair_attempts: u64,
     /// The most root spend one run may be charged before it is refused.
     pub(super) repair_spend: u64,
+    /// The world's run feed every admitted run is written to, when bound.
+    pub(super) runs: Option<RunFeed>,
 }
 
 /// What one call to [`Host::execute`] is asking for.
@@ -202,6 +205,7 @@ impl Host {
             domains: None,
             repair_attempts: default_repair_attempts(),
             repair_spend: default_repair_spend(),
+            runs: None,
         })
     }
 

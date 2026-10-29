@@ -287,6 +287,11 @@ path = "examples/script_vocabulary.rs"
 required-features = ["script"]
 
 [[example]]
+name = "run_events_cost"
+path = "examples/run_events_cost.rs"
+required-features = ["script"]
+
+[[example]]
 name = "guarantees"
 path = "examples/guarantees.rs"
 required-features = ["script", "ephemeral"]
