@@ -111,6 +111,9 @@ pub struct Supervisor {
     /// is no second admission implementation to drift.
     #[cfg(feature = "script")]
     pub(super) tenancy: Option<Arc<tenancy_support::TenancyShell>>,
+    /// The world's run feed every placed task is written to, when bound.
+    #[cfg(feature = "ecs")]
+    pub(super) runs: Option<super::world::SupervisedRuns>,
 }
 
 /// What a supervised body reported when it returned.
@@ -341,6 +344,8 @@ impl Supervisor {
             clock,
             #[cfg(feature = "script")]
             tenancy: None,
+            #[cfg(feature = "ecs")]
+            runs: None,
         }
     }
 

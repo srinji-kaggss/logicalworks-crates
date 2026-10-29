@@ -56,7 +56,7 @@ mod seed_helpers;
 pub use seed::{Rng, Trace};
 
 mod band;
-#[cfg(feature = "rt")]
+#[cfg(any(feature = "process", all(feature = "ecs", feature = "wire")))]
 pub use band::bands;
 #[cfg(all(feature = "ecs", feature = "wire"))]
 pub use band::{BANDS, SEED_SPACE};
@@ -396,7 +396,7 @@ impl Sim {
     /// would have been the shorter answer and the wrong one: the OS reuses it,
     /// so it is not an identity. Nothing in the repository's own tree is ever
     /// written to.
-    #[cfg(feature = "rt")]
+    #[cfg(any(feature = "process", all(feature = "ecs", feature = "wire")))]
     pub fn scratch(&mut self, tag: &str) -> Result<PathBuf, Box<dyn Error>> {
         let unique = lgwks_std::random::bytes::<8>()?;
         let suffix: Vec<String> = unique.iter().map(|byte| format!("{byte:02x}")).collect();

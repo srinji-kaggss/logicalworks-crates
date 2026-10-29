@@ -1,7 +1,15 @@
 # The public-surface ceiling (#526): per library file, how many `pub` items it
 # declares. Exact, so a ceiling may fall and a rise is a visible change here.
 # `check-std-first --surface-baseline` prints the table the tree implies.
+# Drishti's rows arrived with the crate on ADR 0006 R6: its published 0.0.1
+# library surface, every item of which the `drishti` command calls.
 [ceilings]
+"crates/drishti/src/design.rs" = 66
+"crates/drishti/src/ink_lab.rs" = 32
+"crates/drishti/src/ink_lab/engine.rs" = 12
+"crates/drishti/src/lib.rs" = 24
+"crates/drishti/src/native.rs" = 5
+"crates/drishti/src/runtime.rs" = 31
 "crates/lgwks-ast/src/diagnostic.rs" = 20
 "crates/lgwks-ast/src/error.rs" = 1
 "crates/lgwks-ast/src/lib.rs" = 4
@@ -41,13 +49,16 @@
 "crates/lgwks-bot/src/domain/net.rs" = 9
 "crates/lgwks-bot/src/domain/notify.rs" = 6
 "crates/lgwks-bot/src/domain/sys.rs" = 14
-"crates/lgwks-bot/src/ecs.rs" = 18
+"crates/lgwks-bot/src/ecs.rs" = 21
 "crates/lgwks-bot/src/ecs/bot.rs" = 13
 "crates/lgwks-bot/src/ecs/bot_run.rs" = 2
 "crates/lgwks-bot/src/ecs/builder.rs" = 12
 "crates/lgwks-bot/src/ecs/profile.rs" = 11
+"crates/lgwks-bot/src/ecs/requests.rs" = 11
 "crates/lgwks-bot/src/ecs/resources.rs" = 20
+"crates/lgwks-bot/src/ecs/runs.rs" = 9
 "crates/lgwks-bot/src/ecs/scope.rs" = 9
+"crates/lgwks-bot/src/ecs/wake.rs" = 3
 "crates/lgwks-bot/src/ecs/watchdog.rs" = 2
 "crates/lgwks-bot/src/ecs/work.rs" = 10
 "crates/lgwks-bot/src/effect.rs" = 57
@@ -88,10 +99,11 @@
 "crates/lgwks-bot/src/retry.rs" = 27
 "crates/lgwks-bot/src/review.rs" = 26
 "crates/lgwks-bot/src/rt/cancel.rs" = 10
+"crates/lgwks-bot/src/rt/edge.rs" = 6
 "crates/lgwks-bot/src/rt/estate.rs" = 22
 "crates/lgwks-bot/src/rt/fs.rs" = 1
 "crates/lgwks-bot/src/rt/io.rs" = 1
-"crates/lgwks-bot/src/rt/mod.rs" = 14
+"crates/lgwks-bot/src/rt/mod.rs" = 15
 "crates/lgwks-bot/src/rt/net.rs" = 6
 "crates/lgwks-bot/src/rt/process.rs" = 46
 "crates/lgwks-bot/src/rt/process/confine.rs" = 25
@@ -106,6 +118,7 @@
 "crates/lgwks-bot/src/rt/supervise/report.rs" = 28
 "crates/lgwks-bot/src/rt/supervise/run.rs" = 11
 "crates/lgwks-bot/src/rt/supervise/supervisor.rs" = 23
+"crates/lgwks-bot/src/rt/supervise/world.rs" = 1
 "crates/lgwks-bot/src/rt/sync.rs" = 3
 "crates/lgwks-bot/src/rt/task.rs" = 12
 "crates/lgwks-bot/src/rt/tenancy.rs" = 33
@@ -146,7 +159,7 @@
 "crates/lgwks-bot/src/stability.rs" = 21
 "crates/lgwks-bot/src/task.rs" = 48
 "crates/lgwks-bot/src/task/admit.rs" = 1
-"crates/lgwks-bot/src/task/builder.rs" = 25
+"crates/lgwks-bot/src/task/builder.rs" = 26
 "crates/lgwks-bot/src/task/definition.rs" = 13
 "crates/lgwks-bot/src/task/host.rs" = 19
 "crates/lgwks-bot/src/task/ledger.rs" = 15
@@ -158,7 +171,7 @@
 "crates/lgwks-bot/src/tenant_store/error.rs" = 1
 "crates/lgwks-bot/src/tenant_store/rows.rs" = 27
 "crates/lgwks-bot/src/tenant_store/store.rs" = 14
-"crates/lgwks-bot/src/verb.rs" = 8
+"crates/lgwks-bot/src/verb.rs" = 9
 "crates/lgwks-deps/src/audit.rs" = 2
 "crates/lgwks-deps/src/catalog.rs" = 13
 "crates/lgwks-deps/src/contract.rs" = 16

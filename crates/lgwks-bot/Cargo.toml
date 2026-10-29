@@ -43,7 +43,9 @@ keywords = ["orchestration", "workflow", "ecs", "agent", "automation"]
 default = ["script", "ecs", "trace", "wire", "ron"]
 rt = ["lgwks_deps/tokio"]
 time = ["rt", "lgwks_deps/tokio-time"]
-sync = ["rt", "lgwks_deps/tokio-sync"]
+# The supervisor `sync` carries bounds its runs' budgets with a timer, so the
+# timer comes with it; without `time` a `sync` build does not compile.
+sync = ["rt", "time", "lgwks_deps/tokio-sync"]
 macros = ["rt", "lgwks_deps/tokio-macros"]
 # `script!`: the indented orchestration language and the runtime it expands
 # into (`lgwks_bot::script`). Default-on because it is how flows are meant to be
@@ -75,6 +77,13 @@ net = ["io", "lgwks_deps/tokio-net", "lgwks_std/random", "lgwks_std/http"]
 # `Child::kill` cannot do); this enables it, and adds no dependency.
 process = ["io", "sync", "time", "lgwks_std/process", "lgwks_deps/tokio-process"]
 fs = ["io", "lgwks_deps/tokio-fs"]
+# `edge`: the driver's HTTP ingress (ADR 0006 R4). axum, registered under
+# `lgwks_deps`, carries the connection and the router; the world's request
+# system answers every request from its tenant's state. Host-only like `net`,
+# which it carries, so it is not on the WASI default set. It drives the world
+# beside the router on its wakes and deadlines (ADR 0006 R5), so it carries the
+# timer and the select it waits with.
+edge = ["net", "sync", "time", "macros", "ecs", "lgwks_deps/axum"]
 signal = ["rt", "lgwks_deps/tokio-signal"]
 # `inspect`: typed in-process structural code inspection (R8). Host-only, like
 # `process`/`fs`/`net`: it pulls the native tree-sitter grammars through
@@ -154,6 +163,7 @@ full = [
     "net",
     "process",
     "fs",
+    "edge",
     "signal",
     "ephemeral",
     "script",
@@ -287,9 +297,19 @@ path = "examples/script_vocabulary.rs"
 required-features = ["script"]
 
 [[example]]
+name = "run_events_cost"
+path = "examples/run_events_cost.rs"
+required-features = ["script"]
+
+[[example]]
 name = "guarantees"
 path = "examples/guarantees.rs"
 required-features = ["script", "ephemeral"]
+
+[[bin]]
+name = "edge-load"
+path = "src/bin/edge_load.rs"
+required-features = ["edge", "ephemeral"]
 
 [[bin]]
 name = "estate"

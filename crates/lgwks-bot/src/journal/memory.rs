@@ -317,6 +317,15 @@ impl MemoryJournal {
     pub fn recover(&self) -> Recovered {
         recover(self.events())
     }
+
+    /// The sequence the first held entry follows, read from that entry: an
+    /// in-memory journal never continues from a predecessor, so this is genesis.
+    fn chain_base(&self) -> u64 {
+        match self.committed.first() {
+            Some(entry) => entry.position().sequence().saturating_sub(1),
+            None => 0,
+        }
+    }
 }
 
 impl EffectJournal for MemoryJournal {
@@ -331,42 +340,12 @@ impl EffectJournal for MemoryJournal {
         }
     }
 
-    /// Copied out rather than borrowed, because the trait hands the caller a
-    /// value it owns: `recover` folds over the sequence and a journal that
-    /// handed back a borrow would tie the fold to the journal's own lifetime,
-    /// which is exactly the coupling a caller reading a journal it is about to
-    /// give back does not want.
-    fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
-        Ok(self.events().copied().collect())
-    }
+    committed_reads!();
 
-    fn committed_entries(&self) -> Result<Vec<JournalEntry>, JournalError> {
-        Ok(self.committed.clone())
-    }
-
-    fn committed_entry(
-        &self,
-        position: JournalPosition,
-    ) -> Result<Option<JournalEntry>, JournalError> {
-        let Some(index) = position
-            .sequence()
-            .checked_sub(1)
-            .and_then(|n| usize::try_from(n).ok())
-        else {
-            return Ok(None);
-        };
-        Ok(self
-            .committed
-            .get(index)
-            .copied()
-            .filter(|entry| entry.position() == position))
-    }
-
-    fn outcome_at(
-        &self,
-        key: EffectKey,
-    ) -> Result<Option<(JournalPosition, EffectEvidence)>, JournalError> {
-        Ok(self.outcomes.get(&key).copied())
+    /// The same admission test the file adapter makes, so a handoff the file
+    /// would refuse before its first rung is refused here too, not after it.
+    fn reserve_handoff_capacity(&self, rungs: u64) -> Result<(), JournalError> {
+        super::bound_events(self.committed.len(), rungs)
     }
 
     /// This journal's own counts against the shipped ceilings, reporting that it
@@ -397,17 +376,7 @@ impl EffectJournal for MemoryJournal {
         let actual = self.tail();
         let key = event.key();
         check_append_order(expected_tail, actual, event, self.ladder.get(&key).copied())?;
-        let requested_events = u64::saturating_from(self.committed.len()).saturating_add(1);
-        let event_limit = u64::saturating_from(MAX_JOURNAL_EVENTS);
-        if requested_events > event_limit {
-            let refusal = Err(JournalError::CapacityExceeded {
-                resource: JournalLimitKind::Events,
-                limit: event_limit,
-                requested: requested_events,
-            });
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "compare_and_append: returning an error to the caller");
-            return refusal;
-        }
+        super::bound_events(self.committed.len(), 1)?;
         let payload_len =
             u64::saturating_from(event.to_bytes().map_err(JournalError::Encoding)?.len());
         let requested_bytes = self

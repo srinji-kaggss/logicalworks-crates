@@ -313,13 +313,7 @@ impl EffectJournal for FaultJournal {
         Ok(ack)
     }
 
-    fn confirm_outcome(
-        &mut self,
-        key: crate::effect::EffectKey,
-        evidence: EffectEvidence,
-        position: JournalPosition,
-        required: DurabilityPromise,
-    ) -> Result<DurableAck, JournalError> {
+    crate::journal::confirm_outcome_by!(self, key, evidence, position, required, {
         let held = self.durable
             && EffectJournal::committed(&*self.inner.borrow())?.iter().any(
                 |event| matches!(*event, EffectEvent::OutcomeObserved { key: held, evidence: held_evidence }
@@ -329,7 +323,7 @@ impl EffectJournal for FaultJournal {
             return injected(JournalError::ReceiptUnavailable { required });
         }
         Ok(DurableAck::new(position, self.durability()))
-    }
+    });
 }
 
 /// The error a tick that has to refuse returned.

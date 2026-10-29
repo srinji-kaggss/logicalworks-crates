@@ -104,6 +104,10 @@ mod resume_fixtures;
 #[path = "../support/liveness.rs"]
 mod liveness_fixtures;
 
+#[cfg(feature = "script")]
+#[path = "../support/run_world.rs"]
+mod run_world;
+
 #[path = "../support/scratch.rs"]
 mod scratch;
 
@@ -164,6 +168,8 @@ mod durable_crash_group_commit;
 mod durable_crash_observation;
 #[cfg(all(feature = "ecs", feature = "wire"))]
 mod durable_dispatch;
+#[cfg(all(feature = "edge", feature = "ephemeral"))]
+mod edge;
 #[cfg(all(feature = "ecs", feature = "wire"))]
 mod effect_identity;
 #[cfg(all(feature = "ecs", feature = "wire"))]
@@ -225,6 +231,8 @@ mod rt_process;
 mod rt_process_files;
 mod rt_process_stdin;
 mod rt_runtime_stack;
+#[cfg(feature = "script")]
+mod run_events;
 mod script_domains;
 mod script_flow;
 #[cfg(feature = "script")]
@@ -257,7 +265,7 @@ mod sim_credential;
 mod sim_dispatch;
 #[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_dist_lease;
-#[cfg(feature = "net")]
+#[cfg(all(feature = "net", feature = "wire"))]
 mod sim_dist_lease_tcp;
 #[cfg(feature = "ecs")]
 mod sim_ecs_backoff;
@@ -302,6 +310,8 @@ mod sim_review_pr;
 #[cfg(all(feature = "rt", feature = "time", feature = "sync"))]
 mod sim_rt_front_door;
 mod sim_run_boundaries;
+#[cfg(feature = "script")]
+mod sim_run_events;
 #[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_scale;
 mod sim_script;

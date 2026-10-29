@@ -31,7 +31,7 @@ const REPO_URL: &str = "https://github.com/srinji-kaggss/logicalworks-crates";
 /// The page title: the exact name, then what it is.
 const TITLE: &str = "logicalworks-crates — the Rust crates behind Logical Works";
 /// The description a result snippet uses, under 160 characters.
-const DESCRIPTION: &str = "logicalworks-crates is the Rust repository of Logical Works: lgwks_std, lgwks_bot, lgwks_ast, lgwks_macros and lgwks_deps, five independently versioned crates, each usable alone.";
+const DESCRIPTION: &str = "logicalworks-crates is the Rust repository of Logical Works: lgwks_std, lgwks_bot, lgwks_ast, lgwks_macros, lgwks_deps and drishti, six independently versioned crates, each usable alone.";
 
 /// One crate as the page presents it.
 struct Crate {
@@ -42,7 +42,7 @@ struct Crate {
 }
 
 /// The crates this repository publishes.
-const CRATES: [Crate; 5] = [
+const CRATES: [Crate; 6] = [
     Crate {
         name: "lgwks_std",
         summary: "JSON, RON and wire codecs, blocking HTTP, retry policies, time, ids, hashing, globs and structured logging — no async runtime required",
@@ -62,6 +62,10 @@ const CRATES: [Crate; 5] = [
     Crate {
         name: "lgwks_deps",
         summary: "Dependency admission, audit and a storefront: every external edge names its owner, and lgwks-deps check refuses an unowned one",
+    },
+    Crate {
+        name: "drishti",
+        summary: "The Drishti frontend's design publication and reference core: brand tokens with WCAG grades, seeded ink effects and a GPU residency model whose every frame replays by seed",
     },
 ];
 
@@ -165,7 +169,7 @@ fn entity_graph() -> String {
       "@type": "SoftwareSourceCode",
       "@id": "{SITE_URL}#project",
       "name": "logicalworks-crates",
-      "alternateName": ["logicalworks crates", "lgwks", "lgwks_std", "lgwks_bot", "lgwks_ast", "lgwks_macros", "lgwks_deps"],
+      "alternateName": ["logicalworks crates", "lgwks", "lgwks_std", "lgwks_bot", "lgwks_ast", "lgwks_macros", "lgwks_deps", "drishti"],
       "description": "{DESCRIPTION}",
       "codeRepository": "{REPO_URL}",
       "url": "{SITE_URL}",
@@ -196,9 +200,9 @@ fn render_index(abilities: &catalog::Catalog) -> Result<String, Error> {
     html.push_str("<script type=\"application/ld+json\">\n");
     html.push_str(&entity_graph());
     html.push_str("\n</script>\n</head>\n<body>\n<h1>logicalworks-crates</h1>\n");
-    html.push_str("<p class=\"lede\">The Rust crate estate behind Logical Works. Five independently versioned crates, each usable on its own.</p>\n");
+    html.push_str("<p class=\"lede\">The Rust crate estate behind Logical Works. Six independently versioned crates, each usable on its own.</p>\n");
     html.push_str("<p><strong>logicalworks-crates</strong> is the Rust repository of Logical Works Incorporated. It is not a framework and not a rewrite of the ecosystem: it is the layer where a program's authority, its dependency graph and its reading of source code are decided once, and enforced by a compiler and a gate rather than by review.</p>\n");
-    html.push_str("<h2>The five crates</h2>\n<table>\n<thead><tr><th>Crate</th><th>What it gives you</th></tr></thead>\n<tbody>\n");
+    html.push_str("<h2>The six crates</h2>\n<table>\n<thead><tr><th>Crate</th><th>What it gives you</th></tr></thead>\n<tbody>\n");
     crate_rows(&mut html)?;
     html.push_str("</tbody>\n</table>\n");
     html.push_str("<h2>What you can reach, and whether you have to ask</h2>\n");
@@ -230,7 +234,7 @@ fn render_index(abilities: &catalog::Catalog) -> Result<String, Error> {
     )
     .map_err(|cause| Error::Render { cause })?;
     writeln!(html, "<li><a href=\"{REPO_URL}/blob/main/llms.txt\">llms.txt</a> — one fetch for an agent that needs the index.</li>\n</ul>").map_err(|cause| Error::Render { cause })?;
-    html.push_str("<footer>Published by Logical Works Incorporated. <code>lgwks_std</code>, <code>lgwks_ast</code> and <code>lgwks_deps</code> are Apache-2.0; <code>lgwks_bot</code> is MPL-2.0. This page is not affiliated with LogicWorks circuit-design software.</footer>\n</body>\n</html>\n");
+    html.push_str("<footer>Published by Logical Works Incorporated. <code>lgwks_std</code>, <code>lgwks_ast</code>, <code>lgwks_deps</code> and <code>drishti</code> are Apache-2.0; <code>lgwks_bot</code> is MPL-2.0. This page is not affiliated with LogicWorks circuit-design software.</footer>\n</body>\n</html>\n");
     Ok(html)
 }
 

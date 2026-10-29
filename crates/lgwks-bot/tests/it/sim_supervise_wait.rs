@@ -18,7 +18,7 @@
 //! here as a completion count that is not the placed count, or as an outcome
 //! that is neither retained nor counted as dropped.
 
-#![cfg(feature = "rt")]
+#![cfg(feature = "sync")]
 
 use crate::sim;
 

@@ -79,12 +79,12 @@
 
 #[cfg(feature = "wire")]
 use std::sync::Arc;
-#[cfg(any(feature = "wire", feature = "ecs", all(test, feature = "rt")))]
+#[cfg(any(feature = "wire", feature = "ecs", all(test, feature = "sync")))]
 use std::sync::Condvar;
 use std::sync::{Mutex, MutexGuard};
 #[cfg(feature = "script")]
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-#[cfg(any(feature = "wire", feature = "ecs", all(test, feature = "rt")))]
+#[cfg(any(feature = "wire", feature = "ecs", all(test, feature = "sync")))]
 use std::time::Duration;
 
 /// The owner thread, its rings and its ceilings. Only the two file-backed
@@ -183,7 +183,7 @@ pub(crate) fn wait_timeout<'a, T>(
 /// waits with [`wait`] and [`wait_timeout`], neither of which takes a closure.
 /// A fixture's doorbell does open on a bounded predicate, and this keeps its
 /// recovery the same one rather than a second copy beside the other three.
-#[cfg(all(test, any(feature = "wire", feature = "rt")))]
+#[cfg(all(test, any(feature = "wire", feature = "sync")))]
 pub(crate) fn wait_timeout_while<'a, T, F>(
     condvar: &Condvar,
     held: MutexGuard<'a, T>,

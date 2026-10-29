@@ -517,6 +517,9 @@ pub(crate) trait ObserveAny {
     /// holds. A source that reports none answers `None` and the substrate
     /// compares the value itself, which is the path every shipped source takes.
     fn revision(&self) -> Option<u64>;
+    /// Forwards to [`Observe::cadence`]. Read once, when the world is built.
+    #[cfg(feature = "ecs")]
+    fn cadence(&self) -> crate::verb::Cadence;
     /// Issue an [`Auth`] for the observer's own caps and poll it.
     ///
     /// Returns `Ok(None)` when the source produced a value **equal** to
@@ -576,6 +579,11 @@ where
 
     fn revision(&self) -> Option<u64> {
         super::verb::Observe::revision(self)
+    }
+
+    #[cfg(feature = "ecs")]
+    fn cadence(&self) -> crate::verb::Cadence {
+        super::verb::Observe::cadence(self)
     }
 
     fn poll_any<'a>(

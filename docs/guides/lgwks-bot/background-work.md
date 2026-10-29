@@ -14,7 +14,7 @@ Pages of this guide: [tasks](background-work.md) ·
 `rt::supervise::Supervisor` (feature `sync`) owns a set of background tasks and
 stops them when it goes away. `Supervisor::new(max_in_flight)` takes the ceiling,
 clamps it into `1..=Semaphore::MAX_PERMITS`, and offers no argument that produces
-an unbounded supervisor (`crates/lgwks-bot/src/rt/supervise/supervisor.rs:247`).
+an unbounded supervisor (`crates/lgwks-bot/src/rt/supervise/supervisor.rs:250`).
 `Supervisor::default()` is the constructor for the caller who has no opinion: it
 discovers the ceiling from `std::thread::available_parallelism`, so the safe
 default is the *first* thing that resolves rather than something to remember to
@@ -53,6 +53,13 @@ exited non-zero. A process that exited 3 is a `Failed` outcome carrying its
 report buffer is capped at the in-flight ceiling; a caller that spawns without
 ever reading its reports loses detail, never memory, and
 `Stats::reports_dropped` says how much.
+
+`with_runs(feed)` puts the supervisor's work into a bot's world (ADR 0006 R3):
+every task placed is an `admitted` event and every outcome a `settled` one,
+written through the `RunFeed`'s journal, and a bot bound with
+`feed.bind(&mut bot, handler)` runs the handler once per settled task on its next
+tick, never twice across a restart. `Host::builder(..).runs(feed)` does the same
+for a host's runs, and refuses a run the feed cannot record.
 
 A flow that only needs bounded fan-out and a deadline never builds a
 `Supervisor`; it writes the two bounds as words (run once, it prints

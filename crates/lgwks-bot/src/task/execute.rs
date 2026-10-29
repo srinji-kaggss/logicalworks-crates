@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use crate::cap::{Cap, Deficit, Demand, uncovered};
+use crate::ecs::{RunFeed, RunFeedError, RunOutcome, RunTicket};
 use crate::effect::RunId;
 use crate::gate::GrantSet;
 use crate::script::run_store::{Authority as RecordsAuthority, Records};
@@ -239,6 +240,19 @@ impl Host {
         // drops while this run is suspended: the budget returns to what it was,
         // the in-flight count falls, and no body outlives the call.
         let _admission = self.charge(permit);
+        // The run enters the world here, through the journal, before its body
+        // exists (ADR 0006 R3). A feed that cannot record it refuses the run
+        // rather than letting the world miss one that happened.
+        let mut world = match WorldRun::admit(self.inner.runs.as_ref()) {
+            Ok(world) => world,
+            Err(error) => {
+                return self.refuse(
+                    started,
+                    task_name,
+                    format!("the world's run feed refused this run: {error}"),
+                );
+            }
+        };
 
         // The root budget is charged here, after the run was admitted and confirmed
         // to have authority, but before the body runs. A repair is charged exactly
@@ -259,6 +273,7 @@ impl Host {
                 )
                 .await
         {
+            world.settle(Disposition::Refused);
             return self.report(Terminal {
                 started,
                 task: task_name,
@@ -295,6 +310,7 @@ impl Host {
             // in the instant between admission and entry. Either way the body
             // never ran, and the report says so rather than inventing a trail.
             Err(error) => {
+                world.settle(disposition_of(&error));
                 return self.report(Terminal {
                     started,
                     task: task_name,
@@ -407,6 +423,7 @@ impl Host {
             }
             _ => None,
         };
+        world.settle(disposition);
         self.report(Terminal {
             started,
             task: task_name,
@@ -576,6 +593,53 @@ impl Host {
         let store = self.inner.store.as_ref()?;
         run?;
         Some(Records(Arc::new(store.clone())))
+    }
+}
+
+/// One admitted run's place in the world's feed, settled exactly once.
+///
+/// A guard rather than a call at each exit: a run whose future the caller drops
+/// while it is suspended still settles, as [`RunOutcome::Aborted`], so the world
+/// never holds an admitted run nobody will settle.
+struct WorldRun(Option<(RunFeed, RunTicket)>);
+
+impl WorldRun {
+    /// Admit into `feed` when the host has one; a host without a feed admits
+    /// into nothing.
+    fn admit(feed: Option<&RunFeed>) -> Result<Self, RunFeedError> {
+        match feed {
+            Some(feed) => Ok(Self(Some((feed.clone(), feed.admit()?)))),
+            None => Ok(Self(None)),
+        }
+    }
+
+    /// Settle the run as `disposition` says it ended.
+    fn settle(&mut self, disposition: Disposition) {
+        self.record(match disposition {
+            Disposition::Succeeded => RunOutcome::Succeeded,
+            Disposition::Failed => RunOutcome::Failed,
+            Disposition::Cancelled => RunOutcome::Cancelled,
+            Disposition::DeadlineExceeded => RunOutcome::TimedOut,
+            Disposition::Refused => RunOutcome::Refused,
+            Disposition::Blocked => RunOutcome::Blocked,
+        });
+    }
+
+    /// Write the settlement once. The report the caller gets is already
+    /// decided, so a journal that refuses the settlement is traced, and the
+    /// replay reads the run as admitted and unsettled, which is what it is.
+    fn record(&mut self, outcome: RunOutcome) {
+        if let Some((feed, ticket)) = self.0.take()
+            && let Err(error) = feed.settle(ticket, outcome)
+        {
+            lgwks_std::trace::warn!(%error, "execute: the world's run feed refused a settlement");
+        }
+    }
+}
+
+impl Drop for WorldRun {
+    fn drop(&mut self) {
+        self.record(RunOutcome::Aborted);
     }
 }
 

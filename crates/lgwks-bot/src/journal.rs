@@ -60,6 +60,16 @@ pub use crate::ecs::EffectEvidence;
 #[cfg(feature = "wire")]
 use crate::BoxFuture;
 
+/// What the shipped adapters share: the event ceiling and the trait methods
+/// both answer the same way. First, so its macros are in scope in every adapter
+/// module declared below.
+#[macro_use]
+mod adapters;
+
+pub(crate) use adapters::bound_events;
+#[cfg(feature = "wire")]
+pub(crate) use adapters::confirm_outcome_by;
+
 mod wire_form;
 
 #[cfg(feature = "wire")]
@@ -724,6 +734,27 @@ pub trait EffectJournal {
         event: &'a EffectEvent,
     ) -> BoxFuture<'a, Result<DurableAck, JournalError>> {
         Box::pin(async move { self.compare_and_append(expected_tail, event) })
+    }
+
+    /// Append `events` in order at the journal's own tail, as one batch where
+    /// the adapter can make it one.
+    ///
+    /// The default appends rung by rung, so a refusal part way leaves the rungs
+    /// before it recorded. An adapter that can frame the batch into one write
+    /// and one flush overrides it: the file adapter does, so a batch costs one
+    /// sync rather than one per rung, and is all or nothing.
+    ///
+    /// # Errors
+    ///
+    /// Every [`JournalError`] [`Self::compare_and_append`] produces.
+    #[cfg(feature = "wire")]
+    fn append_batch(&mut self, events: &[EffectEvent]) -> Result<Vec<DurableAck>, JournalError> {
+        let mut acks = Vec::with_capacity(events.len());
+        for event in events {
+            let tail = self.tail();
+            acks.push(self.compare_and_append(tail, event)?);
+        }
+        Ok(acks)
     }
 
     /// Confirm that an existing outcome record now meets `required`.

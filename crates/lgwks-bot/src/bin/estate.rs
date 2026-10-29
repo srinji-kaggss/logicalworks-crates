@@ -23,6 +23,11 @@ use lgwks_bot::{Auth, Bot, BotError, Cap, EffectLifetime, GrantSet};
 #[path = "estate/vocabulary.rs"]
 mod vocabulary;
 
+/// Runs entering the world through the journal (ADR 0006 R3), on the shipped
+/// binary.
+#[path = "estate/run_events.rs"]
+mod run_events;
+
 /// One line to the caller's locked stdout; a write error reaches `main` as an I/O error.
 fn say(line: &str) -> std::io::Result<()> {
     writeln!(std::io::stdout().lock(), "{line}")
@@ -521,6 +526,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
+    match run_events::run(&dir) {
+        Ok(line) => say(&line)?,
+        Err(error) => record(&mut mismatch, format!("run events: {error}")),
+    }
+
     let blocker = dir.join("blocker");
     std::fs::write(&blocker, b"a file, not a directory")
         .map_err(|error| format!("the blocker file failed: {error}"))?;

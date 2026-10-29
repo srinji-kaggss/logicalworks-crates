@@ -1,9 +1,9 @@
 # Should I use logicalworks-crates?
 
-`logicalworks-crates` is the Rust repository of Logical Works Incorporated: five
-independently versioned crates published to crates.io, each usable alone
-(`lgwks_std` 3.0.3, `lgwks_bot` 3.1.2, `lgwks_ast` 2.2.1, `lgwks_macros` 1.1.5,
-`lgwks_deps` 4.2.1 in this tree). It is not a framework and not a rewrite of the
+`logicalworks-crates` is the Rust repository of Logical Works Incorporated: six
+independently versioned crates, each usable alone (`lgwks_std` 3.2.1, `lgwks_bot`
+6.0.0, `lgwks_ast` 4.0.0, `lgwks_macros` 1.2.0, `lgwks_deps` 5.1.1 and `drishti`
+0.0.1 in this tree). It is not a framework and not a rewrite of the
 ecosystem: it is the layer where a program's authority, its dependency graph and
 its code reading are decided once instead of in every project.
 
@@ -33,6 +33,9 @@ ecosystem, a support contract, or a package whose bus factor you can ignore.
 - You want "what third-party code is in this build, and who approved it?"
   answered by a command rather than an archaeology project. → `lgwks_deps`
   (`lgwks-deps init .`, `lgwks-deps check .`).
+- You want the Logical Works brand as data (tokens with WCAG grades, the eleven
+  seeded ink effects) or a GPU residency model whose every frame replays by seed.
+  → `drishti` (`drishti tokens`, `drishti ink`, `drishti present`).
 
 ## Don't use it if
 
@@ -49,7 +52,7 @@ ecosystem, a support contract, or a package whose bus factor you can ignore.
 - **You want a distributed system.** These crates refuse a network path rather
   than pretend; read [distributed boundaries](distributed-boundaries.md) first.
 - **`MPL-2.0` is a problem for you.** `lgwks_bot` is file-level copyleft;
-  `lgwks_std`, `lgwks_ast` and `lgwks_deps` are Apache-2.0. The rule and the
+  `lgwks_std`, `lgwks_ast`, `lgwks_deps` and `drishti` are Apache-2.0. The rule and the
   commercial licence are in [`LICENSING.md`](../LICENSING.md).
 - **You need breadth.** One crate here does not replace a stack: adopting
   `lgwks_ast` does not ask you to drop tokio or serde, and adopting `lgwks_bot`
@@ -64,6 +67,7 @@ ecosystem, a support contract, or a package whose bus factor you can ignore.
 | `lgwks_ast` | A linter, codemod or audit reads several languages into one shape | You need a parser generator, or one language with a bespoke parser |
 | `lgwks_macros` | You are using `script!`; it is reached through `lgwks_bot` | Always: there is no standalone reason to depend on it |
 | `lgwks_deps` | You want dependency admission, an audit command, and a storefront with no default third-party edge | You want a licence scanner or an SBOM generator; it is neither |
+| `drishti` | You want the brand's tokens, ink effects or residency model as deterministic, replayable code, or its design publication | You need a usable UI framework today: its proof gates G01–G15 are blocked and no browser host exists |
 
 ## What you are not buying
 

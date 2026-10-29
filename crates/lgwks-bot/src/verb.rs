@@ -10,6 +10,7 @@ use super::cap::{Auth, Cap};
 use super::error::BotError;
 use crate::clock::Clock;
 use std::future::Future;
+use std::time::Duration;
 
 // ── Observe ────────────────────────────────────────────────────────────────
 
@@ -98,6 +99,27 @@ impl core::fmt::Display for RefreshReason {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+/// When the world polls a source, and whether the source asks for a tick of its
+/// own (ADR 0006 R5).
+///
+/// A world driven by its wakes and deadlines ticks only when one of them is
+/// due, and a tick polls only the sources that are due on it, so an idle world
+/// costs no tick and no poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Cadence {
+    /// Polled on every tick the world runs, and never the reason for one: the
+    /// cadence of a source that learns everything by being asked.
+    Tick,
+    /// Polled once this much bot-clock time has passed since its last poll; the
+    /// world ticks at that deadline. A zero period is refused at build.
+    Every(Duration),
+    /// Polled only on the tick after its wake handle was signalled
+    /// (`WakeHandle::for_source`); wakes before that tick coalesce into one poll.
+    /// Polled once on the world's first tick, for its baseline.
+    Wake,
 }
 
 /// Watch a source. Poll, listen, stream. Produces a value each tick.
@@ -215,6 +237,12 @@ pub trait Observe {
     #[must_use]
     fn revision(&self) -> Option<u64> {
         None
+    }
+
+    /// When the world polls this source. [`Cadence::Tick`], every tick the
+    /// world runs, unless the source says otherwise.
+    fn cadence(&self) -> Cadence {
+        Cadence::Tick
     }
 
     /// A legacy, detached digest of the source state.

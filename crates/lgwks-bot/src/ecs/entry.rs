@@ -488,6 +488,18 @@ impl Transition {
         Some(retry.admission(retry_at, first))
     }
 
+    /// The earliest backoff of this transition that ends after `now`.
+    #[cfg(feature = "edge")]
+    pub(super) fn next_retry(&self, now: Duration) -> Option<Duration> {
+        self.entries
+            .iter()
+            .filter_map(|state| match *state {
+                EntryState::DefinitelyFailed { retry_at, .. } if retry_at > now => Some(retry_at),
+                _ => None,
+            })
+            .min()
+    }
+
     /// Whether any entry is still unresolved.
     pub(super) fn has_open(&self) -> bool {
         self.entries.iter().any(EntryState::is_open)

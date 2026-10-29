@@ -144,6 +144,17 @@ impl Ledger {
         self.transitions.get_mut(chain).and_then(Option::take)
     }
 
+    /// The earliest retry backoff of any transition that ends after `now`: the
+    /// deadline a driven world ticks at so the retry is not left waiting.
+    #[cfg(feature = "edge")]
+    pub(super) fn next_retry(&self, now: Duration) -> Option<Duration> {
+        self.transitions
+            .iter()
+            .flatten()
+            .filter_map(|transition| transition.next_retry(now))
+            .min()
+    }
+
     /// Put a chain's transition back, `None` when nothing is retained.
     pub(super) fn put(&mut self, chain: usize, transition: Option<Transition>) {
         if let Some(slot) = self.transitions.get_mut(chain) {

@@ -38,7 +38,10 @@ repository = "https://github.com/srinji-kaggss/logicalworks-crates"
 # edit to this line.
 accepted_licenses = "0BSD, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-3-Clause, CC0-1.0, ISC, MIT, Unlicense, Zlib"
 # `surfaces`: INV-DEP-1's closed set of workspace members and approval owners.
-surfaces = "lgwks_std, lgwks_bot, lgwks_deps, lgwks_ast, lgwks_macros"
+# `drishti` joined as a member on ADR 0006 R6 (the Director's order to merge it
+# with its history): it owns no approval and reaches every third-party crate
+# through the `lgwks_deps` storefront.
+surfaces = "lgwks_std, lgwks_bot, lgwks_deps, lgwks_ast, lgwks_macros, drishti"
 # `frozen_surfaces` / `frozen_tier`: the standalone lgwks_ast's approvals stay
 # boundary (INV-DEP-1). Its edge set grows only on the Director's word: the
 # `script!` parser moved in on the SL-2 direction of 2026-10-08 (#383), reaching
@@ -358,7 +361,7 @@ capability = "ui.gpu-desktop"
 source = "registry"
 allowed_consumers = "lgwks_deps"
 allowed_kinds = "normal"
-reason = "policy-only: no workspace code consumes this edge yet; Zed's GPU-accelerated desktop UI framework has no standard-library equivalent; it is an opt-in storefront feature of lgwks_deps and is never built by default."
+reason = "Zed's GPU-accelerated desktop UI framework has no standard-library equivalent; it is an opt-in storefront feature of lgwks_deps, never built by default, consumed by drishti's native ink lab host (feature `ui`)."
 approved_by = "maintainer"
 approved_on = "2026-09-12"
 review = "https://crates.io/crates/gpui"
@@ -694,7 +697,7 @@ uses_default_features = "false"
 features = "http1, tokio, json, tracing"
 allowed_consumers = "lgwks_deps"
 allowed_kinds = "normal"
-reason = "policy-only: no shipped workspace code consumes this edge yet; revenue slice HTTP routing needs Tower-compatible routing the standard library does not provide; hyper and tower arrive transitively and are not authored edges."
+reason = "lgwks_bot's HTTP edge (`rt::edge`, feature `edge`, ADR 0006 R4) serves through it: HTTP routing needs Tower-compatible routing the standard library does not provide; hyper and tower arrive transitively and are not authored edges."
 approved_by = "maintainer"
 approved_on = "2026-10-26"
 review = "https://github.com/srinji-kaggss/logicalworks-crates/issues/721"

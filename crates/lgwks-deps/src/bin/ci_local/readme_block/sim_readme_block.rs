@@ -76,7 +76,7 @@ type TestResult = Result<(), SimError>;
 const SEEDS: u64 = 2048;
 
 /// The ways `damage` can break a block.
-const DAMAGES: usize = 10;
+const DAMAGES: usize = 11;
 
 /// What a refusal says when the opening sentence is the broken piece.
 const NO_SENTENCE: &str = "no sentence";
@@ -107,7 +107,7 @@ impl Parts {
         Self {
             name: name.to_owned(),
             publisher: "Logical Works Incorporated publishes".to_owned(),
-            count: "one of five".to_owned(),
+            count: "one of six".to_owned(),
             crates: CRATES.iter().map(|listed| (*listed).to_owned()).collect(),
             repository: "https://github.com/srinji-kaggss/logicalworks-crates#readme".to_owned(),
             guide: "https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/should-i-use.md"
@@ -211,25 +211,25 @@ fn sweep(each: impl Fn(u64) -> TestResult) -> TestResult {
 fn damage(parts: &mut Parts, kind: usize) -> Result<String, SimError> {
     let named = match kind {
         0 => {
-            parts.count = "one of six".to_owned();
+            parts.count = "one of seven".to_owned();
             None
         }
         1 => {
             parts.publisher = "Logical Works publishes".to_owned();
             None
         }
-        2..=6 => {
+        2..=7 => {
             let gone = CRATES
                 .get(kind.saturating_sub(2))
                 .ok_or(SimError::Absent("a crate to drop"))?;
             parts.crates.retain(|listed| listed.as_str() != *gone);
             Some(format!("`{gone}`"))
         }
-        7 => {
+        8 => {
             parts.repository = "../../README.md".to_owned();
             Some("#readme)".to_owned())
         }
-        8 => {
+        9 => {
             parts.guide = "../../docs/should-i-use.md".to_owned();
             Some("should-i-use.md".to_owned())
         }
@@ -264,7 +264,7 @@ fn sim_a_rewrapped_block_among_any_prose_is_accepted_and_replays() -> TestResult
     Ok(())
 }
 
-/// Source: #719, which asks for who publishes the crate, that it is one of five and
+/// Source: #719, which asks for who publishes the crate, that it is one of six and
 /// a link to `docs/should-i-use.md`; cargo issue 8434 and crates.io issue 9939 for
 /// the absolute links. Proves: each piece, removed or made relative, is refused with
 /// the piece named, and a block for another crate is not this crate's.

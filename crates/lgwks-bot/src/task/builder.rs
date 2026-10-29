@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use std::{fmt, io};
 
+use crate::ecs::RunFeed;
 use crate::gate::GrantSet;
 use crate::journal::frame::SaturatingFrom;
 use crate::registry::DomainRegistry;
@@ -63,9 +64,21 @@ pub struct HostBuilder {
     pub(super) repair_attempts: u64,
     /// The most root spend one run may be charged before it is refused.
     pub(super) repair_spend: u64,
+    /// The world's run feed, when the caller bound one (ADR 0006 R3).
+    pub(super) runs: Option<RunFeed>,
 }
 
 impl HostBuilder {
+    /// Write every run this host admits and settles into `feed`, the record a
+    /// bot's world binds with [`RunFeed::bind`].
+    ///
+    /// A run the feed cannot record is refused at admission rather than run
+    /// unrecorded, so the world never misses a run that happened.
+    pub fn runs(mut self, feed: RunFeed) -> Self {
+        self.runs = Some(feed);
+        self
+    }
+
     /// Admit at most `tasks` top-level runs at once, from
     /// [`MAX_ADMITTED_TASKS`].
     ///
@@ -307,6 +320,7 @@ impl HostBuilder {
                 domains: self.domains,
                 repair_attempts: self.repair_attempts,
                 repair_spend: self.repair_spend,
+                runs: self.runs,
             }),
         })
     }

@@ -373,18 +373,7 @@ impl FileJournal {
     /// bound. The history is not compacted to make room, so nothing
     /// acknowledged is evicted to admit more work.
     pub(super) fn bound_events(&self, additional: u64) -> Result<(), JournalError> {
-        let requested = u64::saturating_from(self.committed.len()).saturating_add(additional);
-        let limit = u64::saturating_from(MAX_JOURNAL_EVENTS);
-        if requested > limit {
-            let refusal = Err(JournalError::CapacityExceeded {
-                resource: JournalLimitKind::Events,
-                limit,
-                requested,
-            });
-            lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "bound_events: returning an error to the caller");
-            return refusal;
-        }
-        Ok(())
+        crate::journal::bound_events(self.committed.len(), additional)
     }
 
     /// Where the journal lives.

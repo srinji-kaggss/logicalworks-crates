@@ -5,6 +5,7 @@ members = [
     "crates/lgwks-ast",
     "crates/lgwks-deps",
     "crates/lgwks-macros",
+    "crates/drishti",
 ]
 resolver = "2"
 
@@ -20,7 +21,8 @@ resolver = "2"
 # ─────────────────────────────────────────────────────────────────────────────
 [workspace.dependencies]
 lgwks_std = { version = "3.2.1", path = "crates/lgwks-std" }
-# No `lgwks_bot` entry: no member depends on it, and cargo warns on an unused one.
+# Drishti's command orchestrates through `script!`; members opt into features.
+lgwks_bot = { version = "6.0.0", path = "crates/lgwks-bot", default-features = false }
 lgwks_ast = { version = "4.0.0", path = "crates/lgwks-ast" }
 lgwks_macros = { version = "1.2.0", path = "crates/lgwks-macros" }
 # The storefront has no default feature; dependents opt into storefront features

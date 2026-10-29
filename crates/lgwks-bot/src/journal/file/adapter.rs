@@ -6,6 +6,15 @@ use super::{
     MAX_JOURNAL_BYTES, MAX_JOURNAL_EVENTS, SaturatingFrom,
 };
 
+impl FileJournal {
+    /// The sequence this file's first held entry follows: genesis for a fresh
+    /// journal, the seal frame's for a successor, whose sequences continue from
+    /// the predecessor's.
+    fn chain_base(&self) -> u64 {
+        self.chain_from.sequence()
+    }
+}
+
 impl EffectJournal for FileJournal {
     fn durability(&self) -> DurabilityPromise {
         DurabilityPromise::ProcessCrash
@@ -15,44 +24,7 @@ impl EffectJournal for FileJournal {
         self.position
     }
 
-    fn committed(&self) -> Result<Vec<EffectEvent>, JournalError> {
-        Ok(self.events().copied().collect())
-    }
-
-    fn committed_entries(&self) -> Result<Vec<JournalEntry>, JournalError> {
-        Ok(self.committed.clone())
-    }
-
-    fn committed_entry(
-        &self,
-        position: JournalPosition,
-    ) -> Result<Option<JournalEntry>, JournalError> {
-        // `committed` holds this file's own events, and a successor's first one is
-        // not sequence one: its sequences continue from the seal frame it was opened
-        // from. Indexed from the genesis instead, every position a continued
-        // journal acknowledged read back as absent, and a controller settling an
-        // attempt across a continuation reported its outcome as unrecorded.
-        let Some(index) = position
-            .sequence()
-            .checked_sub(self.chain_from.sequence())
-            .and_then(|offset| offset.checked_sub(1))
-            .and_then(|n| usize::try_from(n).ok())
-        else {
-            return Ok(None);
-        };
-        Ok(self
-            .committed
-            .get(index)
-            .copied()
-            .filter(|entry| entry.position() == position))
-    }
-
-    fn outcome_at(
-        &self,
-        key: crate::effect::EffectKey,
-    ) -> Result<Option<(JournalPosition, EffectEvidence)>, JournalError> {
-        Ok(self.outcomes.get(&key).copied())
-    }
+    committed_reads!();
 
     /// Reserve room for the whole three-rung handoff before any of it is
     /// written, so an attempt can never be left admitted and unprepared to
@@ -144,6 +116,11 @@ impl EffectJournal for FileJournal {
         Ok(DurableAck::new(position, self.durability()))
     }
 
+    /// The batch as this file's one write and one flush, all or nothing.
+    fn append_batch(&mut self, events: &[EffectEvent]) -> Result<Vec<DurableAck>, JournalError> {
+        self.compare_and_append_all(events)
+    }
+
     /// The same append, waited for rather than sat through.
     ///
     /// The decision — the fence, the ladder and the bounds — is the
@@ -165,27 +142,22 @@ impl EffectJournal for FileJournal {
         })
     }
 
-    /// Attest that an outcome this journal committed is durable.
-    ///
-    /// The receipt names a position; this journal answers by finding that
-    /// position among its own committed entries and checking it is exactly
-    /// the named outcome. A receipt this journal cannot find names a
-    /// different append than the one being settled, which is
-    /// [`JournalError::ReceiptMismatch`]; a grade above what this journal can
-    /// promise is [`JournalError::ReceiptUnavailable`].
-    ///
-    /// # Errors
-    ///
-    /// [`JournalError::ReceiptUnavailable`] when `required` exceeds this
-    /// journal's promise; [`JournalError::ReceiptMismatch`] when the position
-    /// does not name this outcome as committed.
-    fn confirm_outcome(
-        &mut self,
-        key: crate::effect::EffectKey,
-        evidence: EffectEvidence,
-        position: JournalPosition,
-        required: DurabilityPromise,
-    ) -> Result<DurableAck, JournalError> {
+    super::super::confirm_outcome_by!(
+        /// Attest that an outcome this journal committed is durable.
+        ///
+        /// The receipt names a position; this journal answers by finding that
+        /// position among its own committed entries and checking it is exactly
+        /// the named outcome. A receipt this journal cannot find names a
+        /// different append than the one being settled, which is
+        /// [`JournalError::ReceiptMismatch`]; a grade above what this journal can
+        /// promise is [`JournalError::ReceiptUnavailable`].
+        ///
+        /// # Errors
+        ///
+        /// [`JournalError::ReceiptUnavailable`] when `required` exceeds this
+        /// journal's promise; [`JournalError::ReceiptMismatch`] when the position
+        /// does not name this outcome as committed.
+        self, key, evidence, position, required, {
         if !self.durability().meets(required) {
             let refusal = Err(JournalError::ReceiptUnavailable { required });
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "confirm_outcome: returning an error to the caller");
@@ -209,7 +181,7 @@ impl EffectJournal for FileJournal {
                 actual: self.tail(),
             }),
         }
-    }
+    });
 }
 
 /// Cursor reset for the replay, spelled on the type so the call reads as

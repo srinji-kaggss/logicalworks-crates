@@ -357,7 +357,27 @@ impl Supervisor {
             lgwks_std::trace::debug!(error = ?refusal.as_ref().err(), "run_process_observed: returning an error to the caller");
             return refusal;
         };
-        self.drive_run(lease, spec, on_line).await
+        self.drive_recorded(lease, spec, on_line).await
+    }
+
+    /// [`Self::drive_run`] with the run written into the world's feed: admitted
+    /// before the fork, settled with what the run reports (ADR 0006 R3).
+    ///
+    /// One wrapper over both platform bodies, so a process run on a group and
+    /// one in a job object enter the world the same way.
+    #[cfg(all(any(unix, windows), feature = "process"))]
+    pub(super) async fn drive_recorded(
+        &mut self,
+        lease: super::lease::Lease,
+        spec: &ProcessSpec,
+        on_line: Option<LineObserver<'_>>,
+    ) -> Result<ProcessRun, ProcessRunError> {
+        #[cfg(feature = "ecs")]
+        let ticket = self.admit_inline_run();
+        let run = self.drive_run(lease, spec, on_line).await;
+        #[cfg(feature = "ecs")]
+        self.settle_inline_run(ticket, super::world::ended_as(&run));
+        run
     }
 
     /// Run `spec` to completion under `tenant`, charging the admission to that
@@ -402,7 +422,7 @@ impl Supervisor {
                 return refused;
             }
         };
-        self.drive_run(lease, spec, None)
+        self.drive_recorded(lease, spec, None)
             .await
             .map_err(RunForError::Run)
     }

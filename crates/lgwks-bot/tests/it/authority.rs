@@ -563,7 +563,11 @@ const OTHER_SUBJECTS: [&str; 5] = [
 /// `GrantSet` capability lifetime, which has no `revoke` and is what this scan
 /// protects. A mention there claims supersession of a coordination lease, not
 /// revocation of a capability.
-const NOT_AUTHORITY_CLAIMS: [(&str, &str); 5] = [
+///
+/// The five `crates/drishti` entries are another crate's design record (ADR 0006
+/// R6): each mention is a requirement Drishti's blocked proof gates G01–G15 must
+/// meet, about Drishti's own sessions, so none states what `lgwks_bot` ships.
+const NOT_AUTHORITY_CLAIMS: [(&str, &str); 10] = [
     (
         "docs/frontier.md",
         "the state-of-the-art survey: its mentions are published research and design \
@@ -586,6 +590,31 @@ const NOT_AUTHORITY_CLAIMS: [(&str, &str); 5] = [
     (
         "crates/lgwks-bot/tests/it/sim_dist_lease.rs",
         "the simulation proof of the lease fencing above, not a capability claim",
+    ),
+    (
+        "crates/drishti/VISION.md",
+        "Drishti's vision: the human's power to inspect and revoke is a goal for its \
+         scheduler, not an lgwks_bot operation",
+    ),
+    (
+        "crates/drishti/docs/architecture.md",
+        "Drishti's architecture: a cancellation that cannot revoke a dispatched effect \
+         is a rule for its own adoption, not a claim about GrantSet",
+    ),
+    (
+        "crates/drishti/docs/assurance.md",
+        "Drishti's assurance plan: revoked authority is a case its blocked gates must \
+         exercise, not a shipped operation",
+    ),
+    (
+        "crates/drishti/docs/contract.md",
+        "Drishti's requirement contract: capability loss and revocation handling is \
+         requirement r34, unmet while G01-G15 are blocked",
+    ),
+    (
+        "crates/drishti/docs/decisions.md",
+        "Drishti's decisions: gate G06, blocked, names authority revocation as work its \
+         lifecycle must model",
     ),
 ];
 

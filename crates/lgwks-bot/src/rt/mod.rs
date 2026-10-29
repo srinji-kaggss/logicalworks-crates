@@ -50,6 +50,8 @@
 //! - [`sync`] — `mpsc`, `oneshot`, `broadcast`, `watch`, `Mutex`, `RwLock`,
 //!   `Semaphore`, `Notify`, `Barrier` (feature `sync`).
 //! - `net` — async TCP/UDP and `lookup_host` (feature `net`).
+//! - `edge` — the HTTP ingress: axum in, the world's request system answers
+//!   each request from its tenant's state (feature `edge`, ADR 0006 R4).
 //! - `process`, `fs`, `signal` — opt-in drivers.
 //! - `select!`, `join!`, `try_join!` — the driver's `macro_rules!` combinators,
 //!   re-exported at the crate root so a consumer never names the driver. They are
@@ -109,6 +111,8 @@ pub use lgwks_deps::tokio::task_local;
 /// the ECS substrate is reached through `spec` rather than named directly.
 #[cfg(feature = "sync")]
 mod cancel;
+#[cfg(feature = "edge")]
+pub mod edge;
 #[cfg(feature = "script")]
 pub mod estate;
 #[cfg(feature = "fs")]

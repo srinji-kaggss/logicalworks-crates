@@ -194,8 +194,19 @@ mod entry;
 mod fold;
 #[cfg(feature = "ecs")]
 mod ledger;
+// Requests into the world: the HTTP edge's events (ADR 0006 R4). Gated with
+// the edge, its one producer.
+#[cfg(feature = "edge")]
+mod requests;
 #[cfg(feature = "ecs")]
 mod resources;
+// Runs into the world: the admitted and settled events (ADR 0006 R3).
+#[cfg(feature = "ecs")]
+mod runs;
+// Wakes and deadlines: which sources a tick polls, and when a tick is due (ADR
+// 0006 R5).
+#[cfg(feature = "ecs")]
+mod wake;
 #[cfg(feature = "ecs")]
 mod watchdog;
 // The admitted-input identity the registry derives for `script` and
@@ -214,6 +225,8 @@ pub use builder::EcsBuilder;
 #[cfg(feature = "ecs")]
 pub use builder::EcsObserveBuilder;
 pub use lgwks_std::retry::RetryPolicy;
+#[cfg(feature = "edge")]
+pub use requests::{Request, RequestCounts, RequestFeed, Response};
 #[cfg(feature = "ecs")]
 pub use resources::ForcedRefresh;
 #[cfg(feature = "ecs")]
@@ -222,10 +235,20 @@ pub use resources::StalledSource;
 pub use resources::SupersededObservation;
 #[cfg(feature = "ecs")]
 pub use resources::TickReport;
+#[cfg(all(feature = "ecs", feature = "script"))]
+pub(crate) use runs::RunFeedError;
+#[cfg(all(feature = "ecs", feature = "sync"))]
+pub(crate) use runs::RunTicket;
+#[cfg(feature = "ecs")]
+pub use runs::{RunCounts, RunFeed, RunOutcome, SettledRun};
 #[cfg(feature = "ecs")]
 pub use scope::EffectScope;
 #[cfg(all(feature = "ecs", feature = "ephemeral"))]
 pub use scope::EphemeralError;
+#[cfg(feature = "edge")]
+pub(crate) use wake::NextTick;
+#[cfg(feature = "ecs")]
+pub use wake::WakeHandle;
 #[cfg(feature = "ecs")]
 pub use watchdog::DEFAULT_POLL_DEADLINE;
 #[cfg(feature = "ecs")]

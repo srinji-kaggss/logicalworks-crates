@@ -6,8 +6,8 @@
 # `--update`, and read the diff. A line whose text changes here is a line under
 # a citation that moved, and re-anchoring is confirming each one still supports
 # its claim rather than rewriting the entry to match.
-Cargo.toml:155	print_stderr = "forbid"
-Cargo.toml:156	print_stdout = "forbid"
+Cargo.toml:157	print_stderr = "forbid"
+Cargo.toml:158	print_stdout = "forbid"
 crates/lgwks-ast/src/parser.md:77	The bounds are not interchangeable. [`MAX_SOURCE_BYTES`] bounds the
 crates/lgwks-ast/src/parser/feature_matrix_tests.rs:172	const DECLARED_GRAMMARS: usize = 28;
 crates/lgwks-ast/src/parser/feature_matrix_tests.rs:329	assert_eq!(
@@ -22,13 +22,13 @@ crates/lgwks-bot/src/cap.rs:526	pub fn check(&self, required: &[Cap]) -> Result<
 crates/lgwks-bot/src/domain/sys.rs:43	/// rest is drained and counted, never retained.
 crates/lgwks-bot/src/ecs/admit.rs:344	RetryClass::Never => EntryState::Abandoned {
 crates/lgwks-bot/src/ecs/bot.rs:304	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs/bot.rs:374	let (fired, failure) = self.run_steps(&steps, &mut failures, &retry).await;
-crates/lgwks-bot/src/ecs/bot.rs:483	pub fn tick(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs/builder.rs:610	let mut shortages: Vec<Shortage> = Vec::new();
-crates/lgwks-bot/src/ecs/builder.rs:630	world.insert_resource(Grants(grants.clone()));
+crates/lgwks-bot/src/ecs/bot.rs:378	let (fired, failure) = self.run_steps(&steps, &mut failures, &retry).await;
+crates/lgwks-bot/src/ecs/bot.rs:487	pub fn tick(&mut self) -> Result<usize, BotError> {
+crates/lgwks-bot/src/ecs/builder.rs:611	let mut shortages: Vec<Shortage> = Vec::new();
+crates/lgwks-bot/src/ecs/builder.rs:634	world.insert_resource(Grants(grants.clone()));
 crates/lgwks-bot/src/ecs/fold.rs:377	pub(super) fn fire_plan(world: &mut World) {
 crates/lgwks-bot/src/ecs/fold.rs:731	*failure = Some(error);
-crates/lgwks-bot/src/ecs/ledger.rs:766	/// satisfied, so the entries behind it are unresolved through it.
+crates/lgwks-bot/src/ecs/ledger.rs:777	/// satisfied, so the entries behind it are unresolved through it.
 crates/lgwks-bot/src/ecs/resources.rs:79	pub(super) struct TickError(pub(super) Option<BotError>);
 crates/lgwks-bot/src/ecs/watchdog.rs:39	pub(super) const MAX_IN_FLIGHT_POLLS: usize = 32;
 crates/lgwks-bot/src/error.rs:193	/// the calling thread until its verb futures resolve, and the thread it was
@@ -48,9 +48,9 @@ crates/lgwks-bot/src/language.rs:580	/// Creates a resolver pre-loaded with lear
 crates/lgwks-bot/src/language.rs:611	pub fn learn(&mut self, question: &str, utterance: &str, option: &str) -> Option<Alias> {
 crates/lgwks-bot/src/language.rs:616	.insert(alias.utterance.clone(), alias)
 crates/lgwks-bot/src/language.rs:649	pub fn aliases(&self) -> Vec<Alias> {
-crates/lgwks-bot/src/rt/mod.rs:83	//! This is not a scheduler with realtime guarantees. Future completion order
-crates/lgwks-bot/src/rt/mod.rs:110	#[cfg(feature = "sync")]
-crates/lgwks-bot/src/rt/mod.rs:122	#[cfg(all(feature = "signal", any(unix, windows)))]
+crates/lgwks-bot/src/rt/mod.rs:85	//! This is not a scheduler with realtime guarantees. Future completion order
+crates/lgwks-bot/src/rt/mod.rs:112	#[cfg(feature = "sync")]
+crates/lgwks-bot/src/rt/mod.rs:126	#[cfg(all(feature = "signal", any(unix, windows)))]
 crates/lgwks-bot/src/rt/process.rs:66	Capture(NonZeroUsize),
 crates/lgwks-bot/src/rt/process.rs:707	pub struct ProcessRun {
 crates/lgwks-bot/src/rt/process.rs:827	pub enum ProcessRunError {
@@ -68,7 +68,7 @@ crates/lgwks-bot/src/rt/supervise/repeat.rs:168	token.run_until_cancelled(body(i
 crates/lgwks-bot/src/rt/supervise/run.rs:95	pub async fn spawn_process(&mut self, spec: &ProcessSpec) -> io::Result<TaskId> {
 crates/lgwks-bot/src/rt/supervise/run.rs:134	pub async fn spawn_process_identified(
 crates/lgwks-bot/src/rt/supervise/run.rs:332	pub async fn run_process(&mut self, spec: &ProcessSpec) -> Result<ProcessRun, ProcessRunError> {
-crates/lgwks-bot/src/rt/supervise/supervisor.rs:247	pub fn new(max_in_flight: usize) -> Self {
+crates/lgwks-bot/src/rt/supervise/supervisor.rs:250	pub fn new(max_in_flight: usize) -> Self {
 crates/lgwks-bot/src/rt/supervise/tests.rs:1	//! The supervisor's unit tests: the shared seams and helpers, and one module per concern.
 crates/lgwks-bot/src/rt/task.rs:170	pub async fn join_all_bounded<F, T>(limit: usize, futures: impl IntoIterator<Item = F>) -> Vec<T>
 crates/lgwks-bot/src/semantic.rs:13	//! This tier is consulted only when the lexicon returns [`Resolution::Absent`] —
@@ -101,7 +101,7 @@ crates/lgwks-bot/src/session/value.rs:151	pub fn decode_answer(&self, answer: &s
 crates/lgwks-bot/src/session/value.rs:207	pub(crate) fn decode_integer(raw: &str) -> Option<i64> {
 crates/lgwks-bot/src/session/value.rs:287	Literal(Value),
 crates/lgwks-bot/src/spec.rs:351	pub use crate::ecs::{
-crates/lgwks-bot/src/spec.rs:720	let auth: Auth = grants.issue(self.0.required_caps())?;
+crates/lgwks-bot/src/spec.rs:728	let auth: Auth = grants.issue(self.0.required_caps())?;
 crates/lgwks-deps/src/lib.rs:23	//! remote CI. It reads `cargo metadata --no-deps`, not the transitive lockfile
 crates/lgwks-std/src/process/identity.rs:386	pub fn reap_orphaned_group(leader: &ProcessIdentity) -> io::Result<OrphanReap> {
 crates/lgwks-std/src/task/blocking.rs:155	pub fn spawn_blocking<F, T>(job: F) -> JoinHandle<T>

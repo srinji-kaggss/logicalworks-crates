@@ -106,6 +106,8 @@ pub(super) struct PollScratch {
     pub(super) stalled: Vec<usize>,
     /// The current wave's own indices that have to be polled.
     pub(super) slots: Vec<usize>,
+    /// One flag per chain: woken since the previous tick (ADR 0006 R5).
+    pub(super) woken: Vec<bool>,
 }
 
 /// The change ticks: the revision each chain's committed value was read at, and
