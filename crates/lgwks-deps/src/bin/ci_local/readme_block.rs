@@ -18,14 +18,15 @@ use super::builtins::{crate_directories, relative, tail};
 use super::{GateError, read};
 
 /// The crates the block names, in the order it names them. A crate directory with
-/// a README that is not here is refused, so a sixth crate cannot ship without the
-/// block naming it.
-const CRATES: [&str; 5] = [
+/// a README that is not here is refused, so a seventh crate cannot ship without the
+/// block naming it. `drishti` joined on ADR 0006 R6.
+const CRATES: [&str; 6] = [
     "lgwks_std",
     "lgwks_bot",
     "lgwks_ast",
     "lgwks_macros",
     "lgwks_deps",
+    "drishti",
 ];
 
 /// The repository's README, as the block links it.
@@ -51,7 +52,7 @@ fn flat(text: &str) -> String {
 /// first missing piece, or `None` when the block is whole.
 fn publisher_gap(readme: &str, name: &str) -> Option<String> {
     let words = flat(readme);
-    let opening = format!("Logical Works Incorporated publishes `{name}` as one of five");
+    let opening = format!("Logical Works Incorporated publishes `{name}` as one of six");
     let Some(at) = words.find(&opening) else {
         return Some(format!("no sentence beginning {opening:?}"));
     };
@@ -176,7 +177,7 @@ mod tests {
     /// The block of crate `name`, as a README carries it.
     fn block_of(name: &str) -> String {
         format!(
-            "Logical Works Incorporated publishes `{name}` as one of five independently versioned crates in [logicalworks-crates](https://github.com/srinji-kaggss/logicalworks-crates#readme): `lgwks_std`, `lgwks_bot`, `lgwks_ast`, `lgwks_macros` and `lgwks_deps`.\n[Should I use logicalworks-crates?](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/should-i-use.md) says when to reach for each one and when to skip it.\n"
+            "Logical Works Incorporated publishes `{name}` as one of six independently versioned crates in [logicalworks-crates](https://github.com/srinji-kaggss/logicalworks-crates#readme): `lgwks_std`, `lgwks_bot`, `lgwks_ast`, `lgwks_macros`, `lgwks_deps` and `drishti`.\n[Should I use logicalworks-crates?](https://github.com/srinji-kaggss/logicalworks-crates/blob/HEAD/docs/should-i-use.md) says when to reach for each one and when to skip it.\n"
         )
     }
 

@@ -1,9 +1,9 @@
 # logicalworks-crates
 
-**logicalworks-crates is the Rust crate estate behind Logical Works: five
+**logicalworks-crates is the Rust crate estate behind Logical Works: six
 independently versioned crates — primitives with no async runtime required,
 automation that runs unattended, one AST across many languages, the `script!`
-proc macro, and an audited dependency storefront.**
+proc macro, an audited dependency storefront, and the Drishti frontend.**
 
 [![CI](https://github.com/srinji-kaggss/logicalworks-crates/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/srinji-kaggss/logicalworks-crates/actions/workflows/ci.yml) ![status: unstable](https://img.shields.io/badge/status-unstable-orange) ![license: Apache-2.0 and MPL-2.0](https://img.shields.io/badge/license-Apache--2.0%20%7C%20MPL--2.0-blue)
 [![lgwks_std](https://img.shields.io/crates/v/lgwks_std?label=lgwks_std)](https://crates.io/crates/lgwks_std) [![lgwks_bot](https://img.shields.io/crates/v/lgwks_bot?label=lgwks_bot)](https://crates.io/crates/lgwks_bot) [![lgwks_ast](https://img.shields.io/crates/v/lgwks_ast?label=lgwks_ast)](https://crates.io/crates/lgwks_ast) [![lgwks_macros](https://img.shields.io/crates/v/lgwks_macros?label=lgwks_macros)](https://crates.io/crates/lgwks_macros) [![lgwks_deps](https://img.shields.io/crates/v/lgwks_deps?label=lgwks_deps)](https://crates.io/crates/lgwks_deps)
@@ -24,9 +24,9 @@ exact dependency graph are in [Choosing a crate](docs/choosing-a-crate.md).
 | `lgwks_ast` | 4.0.0 | [docs.rs](https://docs.rs/lgwks_ast) | Parse many languages into one AST type. tree-sitter grammars behind cargo features, bounded traversal, and typed diagnostics for tools that report on code |
 | `lgwks_macros` | 1.2.0 | [docs.rs](https://docs.rs/lgwks_macros) | The syntax of `lgwks_bot::script!`, orchestration written as indented flows. Not a surface of its own: Rust requires a proc macro to live in its own crate, so use it through `lgwks_bot` |
 | `lgwks_deps` | 5.1.1 | [docs.rs](https://docs.rs/lgwks_deps) | One audited place to opt into third-party stacks, plus `lgwks-deps check` and `lgwks-deps debug` to prove dependency and debugger wiring |
+| `drishti` | 0.0.1 | [docs.rs](https://docs.rs/drishti) | The Drishti frontend's design publication and reference core: Logical Works brand tokens, the eleven seeded ink effects, the GPU residency model, a GPUI host (feature `ui`), and the `drishti` command over all of them. Its proof gates G01–G15 stay blocked |
 
-Versions move independently from one repository and one tag; the table lists this tree's
-manifests, not what is published ([`docs/releasing.md`](docs/releasing.md) keeps the two apart).
+Versions move independently from one repository and one tag; the table lists this tree's manifests, not what is published ([`docs/releasing.md`](docs/releasing.md) keeps the two apart).
 
 > **Names.** `lgwks_std` (underscore) lives in `crates/lgwks-std` (hyphen) and is
 > imported `use lgwks_std::...`; `cargo install lgwks_deps` builds `lgwks-deps`.
@@ -115,6 +115,6 @@ Report vulnerabilities through the process in [`SECURITY.md`](SECURITY.md), not 
 
 ## License
 
-Copyright 2026 Logical Works Incorporated. `lgwks_std`, `lgwks_ast` and `lgwks_deps` are Apache-2.0;
+Copyright 2026 Logical Works Incorporated. `lgwks_std`, `lgwks_ast`, `lgwks_deps` and `drishti` are Apache-2.0;
 `lgwks_bot` is [MPL-2.0](crates/lgwks-bot/LICENSE), file-level copyleft. Each crate ships its own `LICENSE`;
 [`LICENSING.md`](LICENSING.md) states the rule, why the bot differs, and the commercial licence.

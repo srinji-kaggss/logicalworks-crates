@@ -76,14 +76,12 @@ Each step lands alone and green.
 ## Alternatives rejected
 
 - **An owned reactor in place of tokio (ADR 0005).** Rebuilds every low-level async function.
-- **tokio and `rt` as the glue, as #734 and #735 left it.** The world becomes one consumer among
-  several and stops driving anything.
+- **tokio and `rt` as the glue, as #734 and #735 left it.** The world becomes one consumer among several.
 - **A runtime per owner.** Several reactors compete for the cores and none carries the world's events.
 
 ## Consequences
 
-- R1 and R2 remove public items (`EcsBot::world`, the private runtimes behind `Host` and `Estate`): major
-  bumps, no shim. axum becomes a registered `lgwks_deps` edge, on by default under ADR 0003.
+- R1 and R2 remove public items (`EcsBot::world`, `Host`'s and `Estate`'s runtimes): major bumps, no shim; axum is a registered `lgwks_deps` edge, default-on (ADR 0003).
 
 ## Correspondence
 
@@ -93,20 +91,20 @@ Supersedes ADR 0005. Builds on `docs/bevy-admission.md`, `docs/bot-on-ecs.md`, `
 
 R1: `tests/it/core_boundary.rs` holds decision 4; `a_planted_driver_import_in_the_core_is_refused` is the falsifier.
 
-R2 landed 2026-10-28. `rt::runtime::driver` builds the one runtime; `Host`, `Estate` and `rt::block_on`
-take its handle. `one_driver_tests::one_process_holds_one_driver` counts one runtime or none across an
-estate, a host and a tick; `sim_one_driver` draws that schedule from a seed across four tenants.
+R2 landed 2026-10-28. `rt::runtime::driver` builds the one runtime; `Host`, `Estate` and `rt::block_on` take its
+handle. `one_driver_tests::one_process_holds_one_driver` counts one runtime or none across an estate, a host and a
+tick; `sim_one_driver` draws that schedule from a seed across four tenants.
 
-R3 landed 2026-10-29. `ecs::RunFeed` journals a run's `admitted`, then `settled`, rungs; `Host` and
-`Supervisor` feed it; `RunFeed::bind` fires the bound system once per settled run. `run_events.rs`: 100
-host runs and 100 tasks leave 100 of each, a reopen fires none, a `SIGKILL` after 50 settlements reopens
-to 50 fires then 0; `sim_run_events`, 512 seeds. `run_events_cost` p50/p95/p99: 1/1/2 µs, then 3/4/9 µs.
+R3 landed 2026-10-29. `ecs::RunFeed` journals a run's `admitted`, then `settled`, rungs; `Host` and `Supervisor` feed
+it; `RunFeed::bind` fires the bound system once per settled run. `run_events.rs`: 100 host runs and 100 tasks leave 100
+of each, a reopen fires none, a `SIGKILL` after 50 settlements reopens to 50 fires then 0; `sim_run_events`, 512 seeds.
+`run_events_cost` p50/p95/p99: 1/1/2 µs, then 3/4/9 µs.
 
-R4 landed 2026-10-29. `rt::edge::serve` runs axum on the driver; `ecs::RequestFeed`, the world's request
-system, answers `/t/{tenant}/…` from that tenant's state in 64 lock-striped partitions, on the worker
-that read it. A queue to the world thread was built first and measured 143k req/s to axum's 167k, so it
-did not land (decision 8). `tests/it/edge.rs` drives two tenants over HTTP; `sim_requests` holds
-isolation, no lost update over 16 threads, a panicking handler and the tenant ceiling over 1,000 seeds.
+R4 landed 2026-10-29. `rt::edge::serve` runs axum on the driver; `ecs::RequestFeed`, the world's request system,
+answers `/t/{tenant}/…` from that tenant's state in 64 lock-striped partitions, on the worker that read it. A queue to
+the world thread was built first and measured 143k req/s to axum's 167k, so it did not land (decision 8).
+`tests/it/edge.rs` drives two tenants over HTTP; `sim_requests` holds isolation, no lost update over 16 threads, a
+panicking handler and the tenant ceiling over 1,000 seeds.
 `edge-load`, 256k posts, 16 tenants, 3 rounds, world vs axum (same ceiling) vs Loco 1.2.0: c=64 166–168k,
 153–165k, 149–150k req/s; c=1024 161–163k, 158–159k, 145k; CPU 4.0–4.1, 4.4–4.7, 6.3–6.7 s; RSS 8.2, 8.6, 19.2 MB.
 
@@ -115,6 +113,8 @@ wakes one source, coalesced; `rt::edge::serve` drives the world beside axum on i
 `sim_wake`, 256 seeds: 0 ticks over a virtual day once idle, one wake polls one source, same seed same hash.
 `edge-load` world (sampling every 1 s, woken on rejections) vs axum, 3 rounds: c=64 163–166k vs 161–164k req/s,
 c=1024 157–161k vs 154–157k; CPU 4.1–4.3 vs 4.5–4.7 s; RSS 8.4–8.7 vs 8.5–8.9 MB at c=64; errors 0.
+
+R6 landed 2026-10-29: `crates/drishti` imports drishti 1318a20, its nine commits named by SHA in the commit since the push gate refuses a commit with no `Design-Plan:`, and splits its six oversize docs; `nextest -p drishti` passes 105 (107 with `ui`): 6 bundle, 7 on the `drishti` binary's `script!` flows (`tests/cli.rs`), 21 seeded sims against independent models (`tests/sim/units.rs`); G01–G15 stay blocked.
 
 Decisions 6 and 7 stay `review only` until the `script` drift test lands (owner: the executing agent,
 2026-10-26). The `doc-governance` lane holds this record's shape.

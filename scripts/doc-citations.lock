@@ -6,8 +6,8 @@
 # `--update`, and read the diff. A line whose text changes here is a line under
 # a citation that moved, and re-anchoring is confirming each one still supports
 # its claim rather than rewriting the entry to match.
-Cargo.toml:155	print_stderr = "forbid"
-Cargo.toml:156	print_stdout = "forbid"
+Cargo.toml:157	print_stderr = "forbid"
+Cargo.toml:158	print_stdout = "forbid"
 crates/lgwks-ast/src/parser.md:77	The bounds are not interchangeable. [`MAX_SOURCE_BYTES`] bounds the
 crates/lgwks-ast/src/parser/feature_matrix_tests.rs:172	const DECLARED_GRAMMARS: usize = 28;
 crates/lgwks-ast/src/parser/feature_matrix_tests.rs:329	assert_eq!(

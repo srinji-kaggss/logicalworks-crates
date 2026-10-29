@@ -1,7 +1,15 @@
 # The public-surface ceiling (#526): per library file, how many `pub` items it
 # declares. Exact, so a ceiling may fall and a rise is a visible change here.
 # `check-std-first --surface-baseline` prints the table the tree implies.
+# Drishti's rows arrived with the crate on ADR 0006 R6: its published 0.0.1
+# library surface, every item of which the `drishti` command calls.
 [ceilings]
+"crates/drishti/src/design.rs" = 66
+"crates/drishti/src/ink_lab.rs" = 32
+"crates/drishti/src/ink_lab/engine.rs" = 12
+"crates/drishti/src/lib.rs" = 24
+"crates/drishti/src/native.rs" = 5
+"crates/drishti/src/runtime.rs" = 31
 "crates/lgwks-ast/src/diagnostic.rs" = 20
 "crates/lgwks-ast/src/error.rs" = 1
 "crates/lgwks-ast/src/lib.rs" = 4

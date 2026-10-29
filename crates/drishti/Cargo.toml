@@ -1,0 +1,63 @@
+[package]
+name = "drishti"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.98"
+description = "Rust frontend orchestration framework: design publication plus a deterministic reference core for the Logical Works ink lab and GPU residency model; no qualified GPU backend yet."
+license = "Apache-2.0"
+repository = "https://github.com/srinji-kaggss/logicalworks-crates"
+documentation = "https://docs.rs/drishti"
+readme = "README.md"
+keywords = ["frontend", "orchestration", "architecture", "gpui"]
+categories = ["gui"]
+include = [
+    "Cargo.toml",
+    "README.md",
+    "VISION.md",
+    "LICENSE",
+    "AGENTS.md",
+    "src/**/*.rs",
+    "docs/*.md",
+    "contract/*.tsv",
+    "experience/*.tsv",
+    "tests/bundle.rs",
+    "tests/cli.rs",
+    "tests/sim/*.rs",
+    "examples/*.rs",
+]
+
+[lib]
+path = "src/lib.rs"
+
+# The library reaches `lgwks_std` for hex and for the trace event every refusal
+# emits. `cli` is the `drishti` command, which orchestrates through lgwks_bot's
+# `script!` and prints JSON through `lgwks_std`. `ui` admits GPUI through the
+# estate storefront (`lgwks_deps`), never as a direct edge (docs/codebase.md,
+# "Primary dependency surface").
+[features]
+default = ["cli"]
+cli = ["dep:lgwks_bot", "lgwks_bot/script", "lgwks_std/json"]
+ui = ["dep:lgwks_deps", "lgwks_deps/gpui"]
+
+[dependencies]
+lgwks_bot = { workspace = true, optional = true }
+lgwks_std = { workspace = true, default-features = false, features = ["trace"] }
+lgwks_deps = { workspace = true, optional = true }
+
+[[bin]]
+name = "drishti"
+path = "src/bin/drishti/main.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "cli"
+required-features = ["cli"]
+
+[[example]]
+name = "ink_lab"
+required-features = ["ui"]
+
+# Drishti's own contract was 66 clippy lints at `forbid`; as a member it holds
+# the workspace's shared lint contract instead, one contract for every crate.
+[lints]
+workspace = true
