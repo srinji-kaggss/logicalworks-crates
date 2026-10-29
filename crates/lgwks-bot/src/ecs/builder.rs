@@ -48,6 +48,7 @@ use super::resources::SourceId;
 use super::resources::TickError;
 use super::resources::TickReport;
 use super::scope::EffectScope;
+use super::wake::Cadences;
 #[cfg(doc)]
 use super::watchdog::DEFAULT_POLL_DEADLINE;
 use super::watchdog::MAX_POLL_DEADLINE;
@@ -626,12 +627,16 @@ impl EcsBot {
             return refusal;
         }
 
+        // Each source's cadence, read once: a zero `Every` is refused here,
+        // before the world exists (ADR 0006 R5).
+        let cadences = Cadences::new(chains.iter().map(|chain| chain.source.cadence()).collect())?;
         let mut world = World::new();
         world.insert_resource(Grants(grants.clone()));
         world.insert_resource(Fired::default());
         world.insert_resource(TickError::default());
         world.insert_resource(Policy::new(policy));
         world.insert_resource(PollBudget(poll_deadline));
+        world.insert_resource(cadences);
 
         let mut order = Vec::with_capacity(chains.len());
         for (index, chain) in chains.iter().enumerate() {

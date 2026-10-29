@@ -15,10 +15,12 @@ use super::resources::Grants;
 use super::resources::Invalidated;
 use super::resources::Observed;
 use super::resources::Order;
+use super::resources::Policy;
 use super::resources::PollScratch;
 use super::resources::SourceId;
 use super::resources::StalledSource;
 use super::resources::TickReport;
+use super::wake::Cadences;
 use super::watchdog::MAX_IN_FLIGHT_POLLS;
 use super::watchdog::PollWatchdog;
 use super::watchdog::WavePoll;
@@ -147,10 +149,16 @@ impl EcsBot {
         // observation — a tick that then failed still has to say which source it
         // gave up on.
         scratch.stalled.clear();
+        // Which `Wake` sources were woken since the last tick, taken once: a
+        // wake that lands while this tick polls asks for the next tick.
+        let cadences = self.world.resource::<Cadences>();
+        cadences.take_wakes(&mut scratch.woken);
+        let now = self.world.resource::<Policy>().now;
         let PollScratch {
             ref mut declared,
             ref mut stalled,
             ref mut slots,
+            ref woken,
         } = *scratch;
         // The deadline threads this tick actually started, one per wave that had
         // a poll left pending. Published beside the stalls they may have caused,
@@ -198,8 +206,13 @@ impl EcsBot {
                     }
                     // `None` from a source that cannot report a revision is never
                     // quiet: that is the value-comparison path, and it runs on
-                    // every tick as it always has.
-                    if !(ticks.quiet(index, reported) && !unsound) {
+                    // every tick as it always has. A source its cadence does not
+                    // make due on this tick is not polled at all (ADR 0006 R5).
+                    // Asked first, so a due `Every` deadline moves on even when
+                    // the revision then says the poll can be skipped.
+                    if cadences.poll_due(index, now, woken)
+                        && !(ticks.quiet(index, reported) && !unsound)
+                    {
                         slots.push(slot);
                     }
                 }

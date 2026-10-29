@@ -41,7 +41,7 @@
 "crates/lgwks-bot/src/domain/net.rs" = 9
 "crates/lgwks-bot/src/domain/notify.rs" = 6
 "crates/lgwks-bot/src/domain/sys.rs" = 14
-"crates/lgwks-bot/src/ecs.rs" = 20
+"crates/lgwks-bot/src/ecs.rs" = 21
 "crates/lgwks-bot/src/ecs/bot.rs" = 13
 "crates/lgwks-bot/src/ecs/bot_run.rs" = 2
 "crates/lgwks-bot/src/ecs/builder.rs" = 12
@@ -50,6 +50,7 @@
 "crates/lgwks-bot/src/ecs/resources.rs" = 20
 "crates/lgwks-bot/src/ecs/runs.rs" = 9
 "crates/lgwks-bot/src/ecs/scope.rs" = 9
+"crates/lgwks-bot/src/ecs/wake.rs" = 3
 "crates/lgwks-bot/src/ecs/watchdog.rs" = 2
 "crates/lgwks-bot/src/ecs/work.rs" = 10
 "crates/lgwks-bot/src/effect.rs" = 57
@@ -162,7 +163,7 @@
 "crates/lgwks-bot/src/tenant_store/error.rs" = 1
 "crates/lgwks-bot/src/tenant_store/rows.rs" = 27
 "crates/lgwks-bot/src/tenant_store/store.rs" = 14
-"crates/lgwks-bot/src/verb.rs" = 8
+"crates/lgwks-bot/src/verb.rs" = 9
 "crates/lgwks-deps/src/audit.rs" = 2
 "crates/lgwks-deps/src/catalog.rs" = 13
 "crates/lgwks-deps/src/contract.rs" = 16

@@ -483,6 +483,9 @@ pub mod verb;
 pub use cap::{Auth, Cap, Deficit, Demand, Shortage};
 #[doc(hidden)]
 #[cfg(feature = "ecs")]
+pub use ecs::WakeHandle;
+#[doc(hidden)]
+#[cfg(feature = "ecs")]
 pub use ecs::{
     DEFAULT_POLL_DEADLINE, ForcedRefresh, MAX_POLL_DEADLINE, RunCounts, RunFeed, RunOutcome,
     SettledRun, StalledSource, SupersededObservation, TickReport,
@@ -565,6 +568,9 @@ pub use spec::{Admission, BotSpec, Need, NeedSet};
 /// ```
 #[cfg(feature = "script")]
 pub use lgwks_macros::script;
+/// When the world polls a source ([`Observe::cadence`]); not a verb either.
+#[doc(hidden)]
+pub use verb::Cadence;
 #[doc(hidden)]
 pub use verb::EffectLifetime;
 /// Why a source cannot be trusted to answer "has this changed?" this tick, and the

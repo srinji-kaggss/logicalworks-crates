@@ -18,7 +18,7 @@ behind an indeterminate effect means.
 ## Case one: a poll failed
 
 Nothing ran. The `observe_fold` system returns before committing anything
-(`crates/lgwks-bot/src/ecs/ledger.rs:766`):
+(`crates/lgwks-bot/src/ecs/ledger.rs:777`):
 
 ```rust,ignore
 // Pass one: the first error, in declaration order.

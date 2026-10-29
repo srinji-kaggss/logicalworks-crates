@@ -41,7 +41,8 @@ impl Clock {
     ///
     /// Crate-private because a consumer waits through the action it runs: the
     /// `Scope` it is handed already names the clock, and `act` is the word that
-    /// spends it. Its one caller is `keyed`.
+    /// spends it. Its callers are `keyed` and the HTTP edge's world driver,
+    /// which waits for a world's next deadline on that world's own clock.
     ///
     /// # Panics
     ///

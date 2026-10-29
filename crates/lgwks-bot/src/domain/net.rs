@@ -567,7 +567,10 @@ mod tests {
                 let (ref open, ref opened) = *held;
                 let mut is_open = crate::journal::owner::lock(open);
                 while !*is_open {
-                    is_open = crate::journal::owner::wait(opened, is_open);
+                    is_open = match opened.wait(is_open) {
+                        Ok(guard) => guard,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
                 }
             });
             match job {

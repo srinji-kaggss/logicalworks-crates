@@ -15,12 +15,18 @@
 //! request from its first byte written to its last byte read, and prints one
 //! line: throughput, p50, p95, p99, max and the error rate. Peak RSS is the
 //! server's, read by the caller (`/usr/bin/time -l`).
+//!
+//! The world's edge is driven as a world (ADR 0006 R5): it samples the settled
+//! count every second and reads the rejections the handler wakes it for, and
+//! it prints both poll counts with its record when it stops.
 
 use std::collections::HashMap;
 use std::fmt;
+use std::future::{Future, ready};
 use std::io::{BufRead, Write};
 use std::net::{SocketAddr, TcpListener};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use lgwks_bot::rt::edge::{EdgeError, EdgeStop, MAX_BODY_BYTES, serve};
@@ -29,7 +35,9 @@ use lgwks_bot::rt::net::TcpStream;
 use lgwks_bot::rt::sync::CancellationToken;
 use lgwks_bot::rt::task::JoinSet;
 use lgwks_bot::spec::EffectScope;
-use lgwks_bot::{Bot, GrantSet, RequestFeed, Response};
+use lgwks_bot::{
+    Auth, Bot, BotError, Cadence, Cap, GrantSet, Observe, RequestFeed, Response, WakeHandle,
+};
 use lgwks_deps::axum::{
     Router,
     body::Bytes,
@@ -114,27 +122,100 @@ fn until_stdin_closes() {
     }
 }
 
-/// The world's edge: each tenant's count is the world's per-tenant state.
+/// How often the world samples the traffic it serves.
+const SAMPLE: Duration = Duration::from_secs(1);
+
+/// What the world reads about the traffic: the requests the feed settled,
+/// sampled `Every` [`SAMPLE`], or the requests the handler rejected, read on
+/// each `Wake` the handler gives. Its polls are counted, so a run shows how
+/// often the driven world ticked under load (ADR 0006 R5).
+struct Traffic {
+    /// The feed whose settled count is sampled, once it exists.
+    feed: Arc<OnceLock<RequestFeed>>,
+    /// The rejections the handler counted; read instead of the feed when set.
+    rejected: Option<Arc<AtomicU64>>,
+    /// When the world polls this source.
+    cadence: Cadence,
+    /// Polls so far.
+    polls: Arc<AtomicU64>,
+}
+
+impl Observe for Traffic {
+    type Output = u64;
+
+    fn required_caps(&self) -> &[Cap] {
+        &[]
+    }
+
+    fn poll(&self, _call: (Auth, ())) -> impl Future<Output = Result<u64, BotError>> {
+        self.polls.fetch_add(1, Ordering::Relaxed);
+        let read = match (self.rejected.as_deref(), self.feed.get()) {
+            (Some(rejected), _) => rejected.load(Ordering::Acquire),
+            (None, Some(feed)) => feed.counts().settled,
+            (None, None) => 0,
+        };
+        ready(Ok(read))
+    }
+
+    fn cadence(&self) -> Cadence {
+        self.cadence
+    }
+
+    fn domain_id(&self) -> &str {
+        "edge-load::traffic"
+    }
+}
+
+/// The world's edge: each tenant's count is the world's per-tenant state, and
+/// the world itself samples the traffic and reads every rejection.
 fn world() -> Result<(), LoadError> {
     let listener = listen()?;
     let scope = EffectScope::ephemeral().map_err(|cause| LoadError::World(cause.to_string()))?;
+    let served = Arc::new(OnceLock::new());
+    let rejected = Arc::new(AtomicU64::new(0));
+    let (samples, reads) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
     let mut bot = Bot::builder("edge-load")
         .with_effects(scope)
+        .observe(Traffic {
+            feed: Arc::clone(&served),
+            rejected: None,
+            cadence: Cadence::Every(SAMPLE),
+            polls: Arc::clone(&samples),
+        })
+        .observe(Traffic {
+            feed: Arc::clone(&served),
+            rejected: Some(Arc::clone(&rejected)),
+            cadence: Cadence::Wake,
+            polls: Arc::clone(&reads),
+        })
         .build(&GrantSet::empty())
         .map_err(|cause| LoadError::World(cause.to_string()))?;
-    let feed = RequestFeed::new(|request, count: &mut u64| {
+    let Some(wake) = WakeHandle::for_source(&bot, 1) else {
+        return refused(LoadError::World(String::from(
+            "the rejection source has no wake",
+        )));
+    };
+    let reject = move |status: u16, body: Vec<u8>| {
+        rejected.fetch_add(1, Ordering::AcqRel);
+        wake.wake();
+        Response::new(status, body)
+    };
+    let feed = RequestFeed::new(move |request, count: &mut u64| {
         if request.path() != "/count" {
             let named = format!("{} has no {}", request.tenant(), request.path());
-            return Response::new(404, named.into_bytes());
+            return reject(404, named.into_bytes());
         }
         if !request.body().is_empty() {
-            return Response::new(400, b"a count takes no body".to_vec());
+            return reject(400, b"a count takes no body".to_vec());
         }
         if request.method() == "POST" {
             *count = count.saturating_add(1);
         }
         Response::new(200, count.to_string().into_bytes())
     });
+    if served.set(feed.clone()).is_err() {
+        return refused(LoadError::World(String::from("the feed was set twice")));
+    }
     let stop = EdgeStop::new();
     std::thread::scope(|scope| {
         let watcher = stop.clone();
@@ -149,8 +230,12 @@ fn world() -> Result<(), LoadError> {
     let mut out = std::io::stdout().lock();
     writeln!(
         out,
-        "world settled={} refused={} tenants={}",
-        counts.settled, counts.refused, counts.tenants
+        "world settled={} refused={} tenants={} samples={} rejection_reads={}",
+        counts.settled,
+        counts.refused,
+        counts.tenants,
+        samples.load(Ordering::Acquire),
+        reads.load(Ordering::Acquire),
     )?;
     Ok(())
 }

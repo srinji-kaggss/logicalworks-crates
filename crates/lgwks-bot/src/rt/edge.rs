@@ -20,11 +20,18 @@
 //! the earlier design queued each request to one world thread and bounded the
 //! wait for its answer, and the hop cost 15% of throughput against plain axum.
 //!
+//! While it serves, [`serve`] also drives the world on the calling thread: the
+//! world ticks when one of its sources is woken (a handler holding a
+//! [`WakeHandle`](crate::ecs::WakeHandle) wakes it) or an `Every` deadline or
+//! retry backoff comes due on its clock, and not otherwise, so an idle world
+//! costs nothing (ADR 0006 R5).
+//!
 //! [`serve`] returns when its [`EdgeStop`] is stopped: axum stops accepting and
 //! drains its connections, the feed closes, and the world ticks once so its
 //! systems see the closing state.
 
 use core::fmt;
+use std::future::IntoFuture as _;
 use std::io;
 use std::net::TcpListener;
 
@@ -36,7 +43,7 @@ use lgwks_deps::axum::{
     response::{IntoResponse, Response as HttpResponse},
 };
 
-use crate::ecs::{EcsBot, Request, RequestFeed};
+use crate::ecs::{EcsBot, NextTick, Request, RequestFeed};
 use crate::error::BotError;
 use crate::rt::runtime::driver;
 use crate::rt::sync::CancellationToken;
@@ -106,27 +113,66 @@ pub fn serve(
     listener: TcpListener,
     stop: &EdgeStop,
 ) -> Result<(), EdgeError> {
-    let served = serve_http(feed, listener, stop);
+    let served = serve_http(world, feed, listener, stop);
     feed.close();
     let ticked = world.tick().map(drop).map_err(EdgeError::World);
     served.and(ticked)
 }
 
-/// axum on the process driver until `stop` is given and every connection has
-/// drained.
-fn serve_http(feed: &RequestFeed, listener: TcpListener, stop: &EdgeStop) -> Result<(), EdgeError> {
+/// axum on the process driver, and the world driven beside it on this thread,
+/// until `stop` is given and every connection has drained.
+fn serve_http(
+    world: &mut EcsBot,
+    feed: &RequestFeed,
+    listener: TcpListener,
+    stop: &EdgeStop,
+) -> Result<(), EdgeError> {
     listener.set_nonblocking(true).map_err(EdgeError::Io)?;
     let handle = driver().map_err(EdgeError::Io)?;
     let router = Router::new().fallback(ingress).with_state(feed.clone());
-    let token = stop.token.clone();
+    let token = &stop.token;
     handle
         .block_on(async move {
             let listener = lgwks_deps::tokio::net::TcpListener::from_std(listener)?;
-            lgwks_deps::axum::serve(listener, router)
-                .with_graceful_shutdown(token.cancelled_owned())
-                .await
+            let http = lgwks_deps::axum::serve(listener, router)
+                .with_graceful_shutdown(token.clone().cancelled_owned())
+                .into_future();
+            let (served, ()) = lgwks_deps::tokio::join!(http, drive(world, token));
+            served
         })
         .map_err(EdgeError::Io)
+}
+
+/// Tick `world` whenever its next tick is due, until `stop` is cancelled.
+///
+/// Waits on the world's own clock for a deadline and on its wakes, so a
+/// virtual clock drives it without real time passing. A tick that fails is
+/// logged and the world driven on: one held transition does not stop the edge.
+async fn drive(world: &mut EcsBot, stop: &CancellationToken) {
+    loop {
+        match world.next_tick() {
+            NextTick::Now => {}
+            NextTick::In(wait) => {
+                lgwks_deps::tokio::select! {
+                    () = stop.cancelled() => return,
+                    () = world.clock().sleep(wait) => {}
+                    () = world.woken() => {}
+                }
+            }
+            NextTick::Idle => {
+                lgwks_deps::tokio::select! {
+                    () = stop.cancelled() => return,
+                    () = world.woken() => {}
+                }
+            }
+        }
+        if stop.is_cancelled() {
+            return;
+        }
+        if let Err(error) = world.tick_async().await {
+            lgwks_std::trace::debug!(%error, "edge: a driven tick did not finish clean");
+        }
+    }
 }
 
 /// The one handler: every request is answered by the world's request system.

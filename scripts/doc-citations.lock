@@ -24,11 +24,11 @@ crates/lgwks-bot/src/ecs/admit.rs:344	RetryClass::Never => EntryState::Abandoned
 crates/lgwks-bot/src/ecs/bot.rs:304	pub async fn tick_async(&mut self) -> Result<usize, BotError> {
 crates/lgwks-bot/src/ecs/bot.rs:378	let (fired, failure) = self.run_steps(&steps, &mut failures, &retry).await;
 crates/lgwks-bot/src/ecs/bot.rs:487	pub fn tick(&mut self) -> Result<usize, BotError> {
-crates/lgwks-bot/src/ecs/builder.rs:610	let mut shortages: Vec<Shortage> = Vec::new();
-crates/lgwks-bot/src/ecs/builder.rs:630	world.insert_resource(Grants(grants.clone()));
+crates/lgwks-bot/src/ecs/builder.rs:611	let mut shortages: Vec<Shortage> = Vec::new();
+crates/lgwks-bot/src/ecs/builder.rs:634	world.insert_resource(Grants(grants.clone()));
 crates/lgwks-bot/src/ecs/fold.rs:377	pub(super) fn fire_plan(world: &mut World) {
 crates/lgwks-bot/src/ecs/fold.rs:731	*failure = Some(error);
-crates/lgwks-bot/src/ecs/ledger.rs:766	/// satisfied, so the entries behind it are unresolved through it.
+crates/lgwks-bot/src/ecs/ledger.rs:777	/// satisfied, so the entries behind it are unresolved through it.
 crates/lgwks-bot/src/ecs/resources.rs:79	pub(super) struct TickError(pub(super) Option<BotError>);
 crates/lgwks-bot/src/ecs/watchdog.rs:39	pub(super) const MAX_IN_FLIGHT_POLLS: usize = 32;
 crates/lgwks-bot/src/error.rs:193	/// the calling thread until its verb futures resolve, and the thread it was
@@ -101,7 +101,7 @@ crates/lgwks-bot/src/session/value.rs:151	pub fn decode_answer(&self, answer: &s
 crates/lgwks-bot/src/session/value.rs:207	pub(crate) fn decode_integer(raw: &str) -> Option<i64> {
 crates/lgwks-bot/src/session/value.rs:287	Literal(Value),
 crates/lgwks-bot/src/spec.rs:351	pub use crate::ecs::{
-crates/lgwks-bot/src/spec.rs:720	let auth: Auth = grants.issue(self.0.required_caps())?;
+crates/lgwks-bot/src/spec.rs:728	let auth: Auth = grants.issue(self.0.required_caps())?;
 crates/lgwks-deps/src/lib.rs:23	//! remote CI. It reads `cargo metadata --no-deps`, not the transitive lockfile
 crates/lgwks-std/src/process/identity.rs:386	pub fn reap_orphaned_group(leader: &ProcessIdentity) -> io::Result<OrphanReap> {
 crates/lgwks-std/src/task/blocking.rs:155	pub fn spawn_blocking<F, T>(job: F) -> JoinHandle<T>

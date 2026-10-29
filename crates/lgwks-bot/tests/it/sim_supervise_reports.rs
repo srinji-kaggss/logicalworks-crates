@@ -35,7 +35,7 @@
 //! Every band runs twice through `sim::assert_replays`, which compares the two
 //! trace hashes, so each test is also its own replay receipt.
 
-#![cfg(feature = "rt")]
+#![cfg(feature = "sync")]
 
 use crate::band_family;
 use crate::sim;

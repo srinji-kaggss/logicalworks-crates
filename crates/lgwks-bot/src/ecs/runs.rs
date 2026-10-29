@@ -39,14 +39,19 @@ use crate::effect::{
     FlowRevision, Id128, RunId,
 };
 use crate::error::BotError;
-use crate::journal::{
-    EffectEvent, EffectEvidence, EffectJournal, JournalError, Verification, VerificationResult,
-};
+#[cfg(feature = "sync")]
+use crate::journal::EffectEvidence;
+use crate::journal::{EffectEvent, EffectJournal, JournalError, Verification, VerificationResult};
 
 use super::bot::EcsBot;
 
 /// Rungs one run writes over its whole life: one admitted, three settled, one
 /// handled. Reserved whole at admission.
+///
+/// Admission and settlement, and everything only they use, are compiled with
+/// `sync`: their one caller is the supervisor (`rt::supervise`), and without
+/// it a world replays and fires settled runs but has nothing that admits one.
+#[cfg(feature = "sync")]
 const RUN_RUNGS: u64 = 5;
 
 /// The most settled runs one tick fires, so a burst of settlements cannot hold
@@ -56,6 +61,7 @@ const RUNS_PER_TICK: usize = 1_024;
 /// The high half of every run id a feed assigns: a domain tag, so a feed's
 /// sequence-numbered ids never collide with a minted 128-bit run id in practice
 /// and never with the all-zero id at all.
+#[cfg(feature = "sync")]
 const FEED_TAG: u128 = 0x6c67_776b_7275_6e73;
 
 /// A 128-bit constant as an identifier. The values below are literal and
@@ -137,6 +143,7 @@ impl RunOutcome {
 
     /// Whether the run's work happened at all: a refused or blocked run ran no
     /// body, which is the one fact `OutcomeObserved` records.
+    #[cfg(feature = "sync")]
     const fn evidence(self) -> EffectEvidence {
         match self {
             Self::Refused | Self::Blocked => EffectEvidence::NotApplied,
@@ -176,13 +183,15 @@ impl SettledRun {
 /// An admitted run, owed one settlement.
 ///
 /// Not `Clone`: [`RunFeed::settle`] consumes it, so one admission settles once.
+#[cfg(feature = "sync")]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct RunTicket {
     /// The run the feed assigned.
     run: RunId,
 }
 
-/// Why the feed refused a write.
+/// Why the feed refused to admit or settle a run.
+#[cfg(feature = "sync")]
 #[derive(Debug)]
 pub(crate) enum RunFeedError {
     /// The journal refused the append; nothing past the refused rung landed.
@@ -191,6 +200,7 @@ pub(crate) enum RunFeedError {
     RunsExhausted,
 }
 
+#[cfg(feature = "sync")]
 impl fmt::Display for RunFeedError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
@@ -200,6 +210,7 @@ impl fmt::Display for RunFeedError {
     }
 }
 
+#[cfg(feature = "sync")]
 impl std::error::Error for RunFeedError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
@@ -209,6 +220,7 @@ impl std::error::Error for RunFeedError {
     }
 }
 
+#[cfg(feature = "sync")]
 impl From<JournalError> for RunFeedError {
     fn from(cause: JournalError) -> Self {
         Self::Journal(cause)
@@ -244,6 +256,7 @@ struct FeedState {
     /// The append-only record every fact goes through.
     journal: Box<dyn EffectJournal + Send>,
     /// The sequence the next admitted run takes.
+    #[cfg(feature = "sync")]
     next: u64,
     /// The counts [`RunFeed::counts`] reports.
     counts: RunCounts,
@@ -277,6 +290,7 @@ impl RunFeed {
         let mut runs: BTreeMap<RunId, Replayed> = BTreeMap::new();
         let mut order: Vec<RunId> = Vec::new();
         let mut counts = RunCounts::default();
+        #[cfg(feature = "sync")]
         let mut next: u64 = 1;
         for event in &committed {
             let key = event.key();
@@ -284,7 +298,10 @@ impl RunFeed {
                 continue;
             }
             let run = key.run();
-            next = next.max(sequence_of(run).saturating_add(1));
+            #[cfg(feature = "sync")]
+            {
+                next = next.max(sequence_of(run).saturating_add(1));
+            }
             match *event {
                 EffectEvent::IntentAdmitted { .. } => {
                     counts.admitted = counts.admitted.saturating_add(1);
@@ -323,6 +340,7 @@ impl RunFeed {
         Ok(Self {
             shared: Arc::new(Mutex::new(FeedState {
                 journal,
+                #[cfg(feature = "sync")]
                 next,
                 counts,
                 due,
@@ -338,6 +356,7 @@ impl RunFeed {
     /// [`RunFeedError::Journal`] when the journal cannot hold the run's five
     /// rungs or refuses the append, and [`RunFeedError::RunsExhausted`] when the
     /// sequence is spent. Either way nothing was recorded.
+    #[cfg(feature = "sync")]
     pub(crate) fn admit(&self) -> Result<RunTicket, RunFeedError> {
         let mut state = self.lock();
         state.journal.reserve_handoff_capacity(RUN_RUNGS)?;
@@ -357,6 +376,7 @@ impl RunFeed {
     /// [`RunFeedError::Journal`] when the append is refused. The three rungs
     /// are one batch, so a durable journal records all of them or none, and a
     /// replay reads a refused settlement as admitted and unsettled.
+    #[cfg(feature = "sync")]
     pub(crate) fn settle(
         &self,
         ticket: RunTicket,
@@ -401,7 +421,7 @@ impl RunFeed {
     ///
     /// The marks are appended first: a batch that failed leaves every run due,
     /// so each fires again rather than being lost (at least once).
-    fn handled(&self, runs: &[SettledRun]) -> Result<(), RunFeedError> {
+    fn handled(&self, runs: &[SettledRun]) -> Result<(), JournalError> {
         let marks: Vec<EffectEvent> = runs
             .iter()
             .map(|run| EffectEvent::Verified {
@@ -442,6 +462,7 @@ impl fmt::Debug for RunFeed {
 
 impl FeedState {
     /// Append one rung at the journal's own tail.
+    #[cfg(feature = "sync")]
     fn append(&mut self, event: &EffectEvent) -> Result<(), JournalError> {
         let tail = self.journal.tail();
         self.journal.compare_and_append(tail, event).map(drop)
@@ -454,11 +475,13 @@ impl FeedState {
 }
 
 /// The run id the feed assigns to sequence `sequence`.
+#[cfg(feature = "sync")]
 fn run_of(sequence: u64) -> RunId {
     RunId::new(id((FEED_TAG << 64) | u128::from(sequence)))
 }
 
 /// The sequence a feed-assigned run id carries in its low eight bytes.
+#[cfg(feature = "sync")]
 fn sequence_of(run: RunId) -> u64 {
     let bytes = run.id().get().get().to_be_bytes();
     let (_tag, low) = bytes.split_at(8);
@@ -544,11 +567,8 @@ impl EcsBot {
         self.world.insert_non_send(hooks);
         match marked {
             Ok(()) => Ok(due.len()),
-            Err(RunFeedError::Journal(cause)) => Err(BotError::EffectRefused {
+            Err(cause) => Err(BotError::EffectRefused {
                 cause: DispatchError::Journal(cause),
-            }),
-            Err(RunFeedError::RunsExhausted) => Err(BotError::EffectRefused {
-                cause: DispatchError::Journal(JournalError::Exhausted),
             }),
         }
     }

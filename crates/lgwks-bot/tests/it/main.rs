@@ -265,7 +265,7 @@ mod sim_credential;
 mod sim_dispatch;
 #[cfg(all(feature = "ecs", feature = "wire"))]
 mod sim_dist_lease;
-#[cfg(feature = "net")]
+#[cfg(all(feature = "net", feature = "wire"))]
 mod sim_dist_lease_tcp;
 #[cfg(feature = "ecs")]
 mod sim_ecs_backoff;
