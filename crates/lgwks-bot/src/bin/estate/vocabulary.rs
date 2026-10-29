@@ -11,15 +11,18 @@
 //! interface; every new `script` item the crate exposes is named here, which
 //! is what makes this module the surface guard's caller for them.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use lgwks_bot::cap::Cap;
 use lgwks_bot::dist_lease::QueueError;
+use lgwks_bot::proposal::{Decoder, LedgerLimits, PlanBudget, PlanLimits, Surface, SurfaceError};
 use lgwks_bot::rt::runtime::Handle;
 use lgwks_bot::script::{
-    Allowance, Compensations, Decision, FlowError, GraphNode, GraphReport, Justify, JustifyCtx,
-    NodeOutcome, Overflow, PumpReport, Rule, Scope, StreamGate, Tenant, TypedAction, TypedSource,
-    Verdict, act_typed, map_domain, observe_typed,
+    Allowance, Compensations, Decision, FlowError, Gate, Generation, GraphNode, GraphReport,
+    Justify, JustifyCtx, NodeOutcome, Overflow, PumpReport, Readiness, ReadinessError, Rule, Scope,
+    StreamGate, Tenant, TypedAction, TypedSource, Verdict, act_typed, map_domain, observe_typed,
 };
 use lgwks_bot::script::{
     MAX_COMPENSATIONS, MAX_GRAPH_NODES, at_most, attempts, retry, within, within_on,
@@ -81,6 +84,41 @@ lgwks_bot::script! {
             step call:
                 7_u64
         give back code
+
+    flow vocab_quote(asked: &AtomicU32) -> u32:
+        let price = remember quote:
+            asked.fetch_add(1, Ordering::SeqCst).saturating_add(40)
+        give back price
+
+    flow vocab_proposal(gate: &Gate, reply: &[u8]) -> usize:
+        let plan = admit from model through (gate):
+            reply
+        give back plan.wanted().len()
+
+    flow vocab_pooled(db: &Readiness<u32>) -> u32:
+        let size = ready pool from (db) within 30s:
+            pool.awaited().saturating_add(0)
+        give back size
+}
+
+/// The capless operation the smoke's surface registers, beside a capful one
+/// the run does not hold.
+const VOCAB_PING: &str = "ping";
+
+/// A gate for `admit`: `ping` admits with no grant, `read-report` needs
+/// `fs`, which this run is never granted.
+fn vocab_gate() -> Result<Gate, VocabularyError> {
+    let mut builder = Surface::builder("vocab")?;
+    builder = builder.operation(VOCAB_PING, &[])?;
+    builder = builder.operation("read-report", &[Cap::fs()])?;
+    let limits = LedgerLimits::new(2, 4);
+    Ok(Gate::new(
+        "vocab",
+        builder.build(),
+        Decoder::new(PlanLimits::default()),
+        PlanBudget::new(2),
+        limits,
+    ))
 }
 
 /// The vocabulary's own error: what a typed call maps a refusal into.
@@ -135,6 +173,8 @@ pub(crate) enum Section {
     Stream,
     /// The typed domain boundary.
     Typed,
+    /// The remembered step, admission and readiness.
+    Durable,
 }
 
 impl std::fmt::Display for Section {
@@ -147,6 +187,7 @@ impl std::fmt::Display for Section {
             Self::Compensation => "compensation",
             Self::Stream => "stream",
             Self::Typed => "typed",
+            Self::Durable => "durable",
         };
         formatter.write_str(name)
     }
@@ -168,6 +209,10 @@ pub(crate) enum VocabularyError {
     Flow(FlowError),
     /// The gate refused its bound: a matchable queue refusal.
     Queue(QueueError),
+    /// The readiness refused its name or its signal.
+    Readiness(ReadinessError),
+    /// The admission surface refused to build.
+    Surface(SurfaceError),
     /// The report was not written: the write's own error.
     Io(std::io::Error),
 }
@@ -181,6 +226,8 @@ impl std::fmt::Display for VocabularyError {
             }
             Self::Flow(ref error) => write!(formatter, "vocabulary runtime failed: {error}"),
             Self::Queue(ref error) => write!(formatter, "vocabulary queue failed: {error}"),
+            Self::Readiness(ref error) => write!(formatter, "vocabulary readiness failed: {error}"),
+            Self::Surface(ref error) => write!(formatter, "vocabulary surface failed: {error}"),
             Self::Io(ref error) => write!(formatter, "vocabulary report failed: {error}"),
         }
     }
@@ -192,6 +239,8 @@ impl std::error::Error for VocabularyError {
             Self::Check { .. } => None,
             Self::Flow(ref error) => Some(error),
             Self::Queue(ref error) => Some(error),
+            Self::Readiness(ref error) => Some(error),
+            Self::Surface(ref error) => Some(error),
             Self::Io(ref error) => Some(error),
         }
     }
@@ -208,6 +257,20 @@ impl From<QueueError> for VocabularyError {
     /// A refused bound travels as itself, naming the zero cap.
     fn from(error: QueueError) -> Self {
         Self::Queue(error)
+    }
+}
+
+impl From<ReadinessError> for VocabularyError {
+    /// A refused readiness travels as itself.
+    fn from(error: ReadinessError) -> Self {
+        Self::Readiness(error)
+    }
+}
+
+impl From<SurfaceError> for VocabularyError {
+    /// A refused surface travels as itself.
+    fn from(error: SurfaceError) -> Self {
+        Self::Surface(error)
     }
 }
 
@@ -530,5 +593,42 @@ pub(crate) fn run(driver: &Handle) -> Result<(), VocabularyError> {
         return refuse(Section::Typed, "a failure crosses as the domain's error");
     }
     say("typed: undeclared domains fail typed, the boundary maps both ways")?;
+
+    // Durable words: `remember` runs its block once, `admit` admits only a
+    // registered operation, and `ready` is released by the pool's signal.
+    let asked = AtomicU32::new(0);
+    let price = driver.block_on(vocab_quote(&scope, &asked))?;
+    if price != 40 || asked.load(Ordering::SeqCst) != 1 {
+        return refuse(
+            Section::Durable,
+            "a remembered block runs once and gives its value",
+        );
+    }
+    let gate = vocab_gate()?;
+    let wanted = driver.block_on(vocab_proposal(&scope, &gate, b"op=ping\n"))?;
+    if wanted != 1 {
+        return refuse(
+            Section::Durable,
+            "the admitted plan wants its one operation",
+        );
+    }
+    if !matches!(
+        driver.block_on(vocab_proposal(&scope, &gate, b"op=read-report\n")),
+        Err(FlowError::Refused { .. })
+    ) {
+        return refuse(
+            Section::Durable,
+            "an operation past the run's grant is refused",
+        );
+    }
+    let db: Readiness<u32> = Readiness::new("vocab-pool")?;
+    db.ready(Generation::FIRST, 8)?;
+    let size = driver.block_on(vocab_pooled(&scope, &db))?;
+    if size != 8 {
+        return refuse(Section::Durable, "the wait is released with the pool");
+    }
+    say(&format!(
+        "durable: remembered {price}, admitted {wanted} operation, pool of {size}"
+    ))?;
     Ok(())
 }

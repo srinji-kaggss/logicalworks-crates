@@ -25,7 +25,7 @@
 "crates/lgwks-ast/src/script/lexicon.rs" = 23
 "crates/lgwks-ast/src/script/mod.rs" = 9
 "crates/lgwks-ast/src/script/tree.rs" = 96
-"crates/lgwks-ast/src/script/tree/vocab.rs" = 23
+"crates/lgwks-ast/src/script/tree/vocab.rs" = 35
 "crates/lgwks-bot/src/broker.rs" = 15
 "crates/lgwks-bot/src/cap.rs" = 35
 "crates/lgwks-bot/src/cas.rs" = 31
@@ -123,7 +123,7 @@
 "crates/lgwks-bot/src/rt/task.rs" = 12
 "crates/lgwks-bot/src/rt/tenancy.rs" = 33
 "crates/lgwks-bot/src/rt/time.rs" = 19
-"crates/lgwks-bot/src/script/admit.rs" = 20
+"crates/lgwks-bot/src/script/admit.rs" = 21
 "crates/lgwks-bot/src/script/compensate.rs" = 7
 "crates/lgwks-bot/src/script/control.rs" = 3
 "crates/lgwks-bot/src/script/domain.rs" = 8
@@ -139,7 +139,7 @@
 "crates/lgwks-bot/src/script/ready/outcome.rs" = 10
 "crates/lgwks-bot/src/script/ready/readiness.rs" = 16
 "crates/lgwks-bot/src/script/ready/state.rs" = 1
-"crates/lgwks-bot/src/script/run_store.rs" = 12
+"crates/lgwks-bot/src/script/run_store.rs" = 13
 "crates/lgwks-bot/src/script/scope.rs" = 25
 "crates/lgwks-bot/src/script/stream.rs" = 12
 "crates/lgwks-bot/src/script/trail.rs" = 11

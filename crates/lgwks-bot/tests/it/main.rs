@@ -316,6 +316,7 @@ mod sim_run_events;
 mod sim_scale;
 mod sim_script;
 mod sim_script_domains;
+mod sim_script_durable;
 mod sim_script_fanout;
 mod sim_script_feeds;
 mod sim_script_steps;

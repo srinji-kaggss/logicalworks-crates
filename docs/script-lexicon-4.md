@@ -60,3 +60,54 @@ flow sync(api: &Api, rules: &Justify) -> u16:
             api.call().await.or_fail()?
     give back code
 ```
+
+## `remember`
+
+Opens a block: its line ends in `:`. Calls `remembered_at`.
+
+- `remember name:` — the block once per run; a resume reads its value back
+
+Refuses: a name that is not one word.
+
+Guarantees: a resume replays the value, never the block (ephemeral); a nameless `remember` is refused (idiomatic).
+
+```text
+flow ask(model: &Model) -> String:
+    let reply = remember ask:
+        model.ask().await.or_retry()?
+    give back reply
+```
+
+## `admit`
+
+Opens a block: its line ends in `:`. Calls `admit_at`.
+
+- `admit from model through (gate):` (or `tool`, `document`) — the block's bytes admitted as a `Plan`; a refusal fails the step
+
+Refuses: a producer other than `model`, `tool`, `document`.
+
+Guarantees: a refusal is typed, at the step, with its provenance (decoupled); an `admit` with no gate is refused (idiomatic).
+
+```text
+flow plan(reply: &[u8], gate: &Gate) -> usize:
+    let plan = admit from model through (gate):
+        reply
+    give back plan.wanted().len()
+```
+
+## `ready`
+
+Opens a block: its line ends in `:`. Calls `Readiness::wait`.
+
+- `ready x from (readiness) within 30s:` — the block once `readiness` is signalled, `x` bound to it
+
+Refuses: a `ready` with no `within`.
+
+Guarantees: released by the signal, never a poll; `TimedOut` past the deadline (hyperscale); a `ready` with no deadline is refused (idiomatic).
+
+```text
+flow rows(db: &Readiness<Pool>) -> u64:
+    let n = ready pool from (db) within 30s:
+        pool.awaited().count()
+    give back n
+```

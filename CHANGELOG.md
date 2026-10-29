@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the five crates are recorded here. Versions move
+All notable changes to the six crates are recorded here. Versions move
 independently; each release lists per-crate deltas. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 semantic from 1.0.0: a major bump breaks, a minor adds, a patch fixes
@@ -9,6 +9,7 @@ breaks are listed explicitly under the crate.
 
 ## Releases, newest first
 
+- lgwks_std 3.2.2 / lgwks_deps 5.1.2 / lgwks_ast 4.1.0 / lgwks_macros 1.3.0 / lgwks_bot 6.1.0 / drishti 0.1.0 - 2026-10-29: [notes](docs/changelog/07-durable-words-2026-10-29.md)
 - lgwks_std 3.2.1 / lgwks_deps 5.1.1 / lgwks_ast 4.0.0 / lgwks_macros 1.2.0 / lgwks_bot 6.0.0 - 2026-10-28: [notes](docs/changelog/06-script-words-2026-10-28.md)
 - lgwks_std 3.2.0 / lgwks_deps 5.1.0 / lgwks_ast 3.1.0 / lgwks_bot 5.0.0 - 2026-10-27: [notes](docs/changelog/05-http-store-ledger-2026-10-27.md)
 - lgwks_std 3.1.0 / lgwks_deps 5.0.0 / lgwks_ast 3.0.0 / lgwks_bot 4.0.0 / lgwks_macros 1.1.6 - 2026-10-25: [notes](docs/changelog/04-v7-ids-estate-freshness-2026-10-25.md)

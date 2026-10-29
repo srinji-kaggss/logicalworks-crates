@@ -43,7 +43,7 @@ use crate::proposal::{
 };
 
 use super::run_store::{remember_at, step_definition};
-use super::{FlowError, Scope};
+use super::{FlowError, Scope, Site};
 
 /// The run-scoped state one run's admissions share.
 ///
@@ -232,7 +232,33 @@ pub async fn admit(
     payload: &[u8],
     source: Source,
 ) -> Result<Plan, FlowError> {
-    let here = scope.enter(step)?;
+    admit_from(scope.enter(step)?, gate, payload, source).await
+}
+
+/// [`admit`] for an `admit from <producer> through (gate):` that `script!`
+/// wrote at `site`, which the step's trail entry carries. Called by `script!`.
+///
+/// # Errors
+///
+/// As [`admit`].
+pub async fn admit_at(
+    scope: &Scope,
+    step: &str,
+    site: &'static Site,
+    gate: &Gate,
+    payload: &[u8],
+    source: Source,
+) -> Result<Plan, FlowError> {
+    admit_from(scope.enter_at(step, site)?, gate, payload, source).await
+}
+
+/// The admission itself, in the step `here` already entered.
+async fn admit_from(
+    here: Scope,
+    gate: &Gate,
+    payload: &[u8],
+    source: Source,
+) -> Result<Plan, FlowError> {
     match decide(gate, payload, source) {
         Decision::Admitted(plan) => Ok(plan),
         Decision::Refused {

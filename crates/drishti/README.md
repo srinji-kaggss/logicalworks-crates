@@ -2,7 +2,7 @@
 
 **Frontend is orchestration. Creators express experiences; the framework owns the coordination that makes them coherent.**
 
-**Version 0.0.1 published the documentation-only design package.** This working tree adds the first realized presentation layer: the Logical Works ink lab (`src/ink_lab.rs`), its brand tokens (`src/design.rs`), the GPU residency model (`src/runtime.rs`), and a native GPU host (`src/native.rs`, feature `ui`) that presents ink frames in a GPUI window. GPUI arrives through the estate storefront (`lgwks_deps/gpui`). A browser host, the goo filter (GPUI 0.2 has no blur or threshold pass), and a qualified Keel integration are still absent.
+**Version 0.0.1 published the documentation-only design package; 0.1.0 publishes the first realized presentation layer:** the Logical Works ink lab (`src/ink_lab.rs`), its brand tokens (`src/design.rs`), the GPU residency model (`src/runtime.rs`), and a native GPU host (`src/native.rs`, feature `ui`) that presents ink frames in a GPUI window. GPUI arrives through the estate storefront (`lgwks_deps/gpui`). A browser host, the goo filter (GPUI 0.2 has no blur or threshold pass), and a qualified Keel integration are still absent.
 
 ```text
 cargo run --release --features ui --example ink_lab                       # open the ink lab

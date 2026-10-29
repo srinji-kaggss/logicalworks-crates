@@ -61,9 +61,13 @@ fn construct_lines(construct: &Construct, out: &mut Vec<Passthrough>) {
         Construct::Each(ref each) => each.body(),
         Construct::Within(ref within) => within.body(),
         Construct::Retry(ref again) => again.body(),
-        Construct::Step(ref step) | Construct::Saga(ref step) => step.body(),
+        Construct::Step(ref step) | Construct::Saga(ref step) | Construct::Remember(ref step) => {
+            step.body()
+        }
         Construct::Whenever(ref feed) => feed.body(),
         Construct::Justify(ref block) => block.governed(),
+        Construct::Admit(ref admitted) => admitted.payload(),
+        Construct::Ready(ref waited) => waited.body(),
         Construct::Graph(ref declared) => {
             for node in declared.nodes() {
                 block_lines(node.body(), out);

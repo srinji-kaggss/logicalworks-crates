@@ -30,7 +30,7 @@ mod vocab;
 mod words;
 
 use blocks::{each, for_loop, if_chain, retry, split_let, step, together, within};
-use vocab::{compensate, graph, justify, saga, whenever};
+use vocab::{admit, compensate, graph, justify, named, ready, whenever};
 use words::{expect_words, rewrite, run_only, shape, text_of};
 
 /// Ordinals for sibling labels within one scope.
@@ -282,7 +282,7 @@ fn statement(
 }
 
 /// Read a block that yields a value: `each`, `within`, `retry`, `step`,
-/// `graph`, `saga`, `whenever`, `justify`.
+/// `graph`, `saga`, `whenever`, `justify`, `remember`, `admit`, `ready`.
 fn construct(
     line: &Line,
     children: &[Node],
@@ -294,9 +294,11 @@ fn construct(
         Some(Kind::Retry) => retry(line, children, labels),
         Some(Kind::Step) => step(line, children, labels),
         Some(Kind::Graph) => graph(line, children, labels),
-        Some(Kind::Saga) => saga(line, children, labels),
+        Some(kind @ (Kind::Saga | Kind::Remember)) => named(line, children, labels, kind),
         Some(Kind::Whenever) => whenever(line, children, labels),
         Some(Kind::Justify) => justify(line, children, labels),
+        Some(Kind::Admit) => admit(line, children, labels),
+        Some(Kind::Ready) => ready(line, children, labels),
         Some(Kind::Node) => {
             let refusal = Err(Refusal::new(
                 line.span,
