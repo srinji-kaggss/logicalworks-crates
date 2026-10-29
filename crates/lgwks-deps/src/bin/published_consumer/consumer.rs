@@ -42,6 +42,15 @@ const DEPS_TOKIO: &str = "fn main() {
 /// runnable block at its tag.
 const LINKS: &str = "fn main() {}\n";
 
+/// What `drishti`'s consumer runs: its README holds no Rust block, so the
+/// program reads the published palette, the library's own design tokens.
+const DRISHTI_PALETTE: &str = "fn main() {
+    use drishti::design::{Palette, Theme};
+    assert_eq!(Palette::dark().theme, Theme::Dark);
+    assert_eq!(Palette::light().theme, Theme::Light);
+}
+";
+
 /// One consumer: a crate, a feature set, and where its program comes from.
 pub(crate) struct Row {
     /// The crate's name on crates.io.
@@ -60,7 +69,9 @@ pub(crate) struct Row {
 
 /// Every consumer, in receipt order. `lgwks_bot`'s runnable flow is on its
 /// script page: its `README.md` is the overview and holds no Rust block.
-pub(crate) const ROWS: [Row; 8] = [
+/// `lgwks_macros` is linked on its own, so a version that resolves only
+/// through `lgwks_bot` is still caught.
+pub(crate) const ROWS: [Row; 10] = [
     Row {
         name: "lgwks_std",
         dir: "crates/lgwks-std",
@@ -124,6 +135,22 @@ pub(crate) const ROWS: [Row; 8] = [
         spec: "features = [\"full\"]",
         page: "README-script.md",
         minimal: LINKS,
+    },
+    Row {
+        name: "lgwks_macros",
+        dir: "crates/lgwks-macros",
+        label: "default",
+        spec: "default-features = true",
+        page: "README.md",
+        minimal: LINKS,
+    },
+    Row {
+        name: "drishti",
+        dir: "crates/drishti",
+        label: "default",
+        spec: "default-features = true",
+        page: "README.md",
+        minimal: DRISHTI_PALETTE,
     },
 ];
 

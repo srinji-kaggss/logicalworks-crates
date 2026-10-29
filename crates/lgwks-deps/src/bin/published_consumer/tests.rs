@@ -139,14 +139,20 @@ fn the_deps_minimal_program_names_only_modules_the_root_keeps() {
 }
 
 #[test]
-fn eight_consumers_each_their_own_package() {
+fn ten_consumers_each_their_own_package() {
     let packages: BTreeSet<(&str, &str)> = ROWS.iter().map(|row| (row.name, row.label)).collect();
     assert_eq!(
         packages.len(),
         ROWS.len(),
         "a crate and feature set name one consumer"
     );
-    assert_eq!(ROWS.len(), 8, "std x3, ast, deps x2, bot x2");
+    assert_eq!(
+        ROWS.len(),
+        10,
+        "std x3, ast, deps x2, bot x2, macros, drishti"
+    );
+    let crates: BTreeSet<&str> = ROWS.iter().map(|row| row.name).collect();
+    assert_eq!(crates.len(), 6, "every published crate has a consumer");
 }
 
 #[test]

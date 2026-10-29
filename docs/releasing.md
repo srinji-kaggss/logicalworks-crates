@@ -113,8 +113,8 @@ tag, with the README's own quickstart as the program:
 cargo run -p lgwks_deps --bin published-consumer
 ```
 
-It prints one receipt line per consumer (eight: `lgwks_std` default, core and
+It prints one receipt line per consumer (ten: `lgwks_std` default, core and
 full; `lgwks_ast`; `lgwks_deps` default and `tokio-full`; `lgwks_bot` default
-and full) and exits non-zero when one fails or a tag names a version crates.io
+and full; `lgwks_macros`; `drishti`) and exits non-zero when one fails or a tag names a version crates.io
 does not serve as its newest. The release is done at `published consumers: all
 passed`.
