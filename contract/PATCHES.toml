@@ -20,6 +20,50 @@
 # Read by `lgwks_deps`: the ledger is opt-in, and a repository without one is
 # audited exactly as before.
 
+# candle 0.11.0 on crates.io requires zip ^8.6 (RUSTSEC-2026-0367..0369,
+# GHSA-m665-v7pm-7grj); upstream merged zip 9.1.3 in #4078 and promised a
+# release. The digest is the git object id of the pinned merge commit. Remove
+# all three rows, the `git`/`rev` keys and the `origin` lines in APPROVED.toml
+# when candle 0.11.1 publishes.
+[[patch]]
+crate = "candle-core"
+kind = "upstream-pin"
+owner = "lgwks_deps"
+reason = "The crates.io release requires zip 8.6, which carries three RustSec advisories and a critical GHSA."
+review = "https://github.com/huggingface/candle/issues/4074"
+recorded_on = "2026-10-30"
+expires_on = "2027-01-30"
+version = "0.11.0"
+upstream_issue = "https://github.com/huggingface/candle/issues/4074"
+upstream_pr = "https://github.com/huggingface/candle/pull/4078"
+patch_digest = "git:9515d410e3af803fd45efebfef8137f47d85a63d"
+
+[[patch]]
+crate = "candle-nn"
+kind = "upstream-pin"
+owner = "lgwks_deps"
+reason = "It must resolve the same candle-core commit, so it rides the zip pin with it."
+review = "https://github.com/huggingface/candle/issues/4074"
+recorded_on = "2026-10-30"
+expires_on = "2027-01-30"
+version = "0.11.0"
+upstream_issue = "https://github.com/huggingface/candle/issues/4074"
+upstream_pr = "https://github.com/huggingface/candle/pull/4078"
+patch_digest = "git:9515d410e3af803fd45efebfef8137f47d85a63d"
+
+[[patch]]
+crate = "candle-transformers"
+kind = "upstream-pin"
+owner = "lgwks_deps"
+reason = "It must resolve the same candle-core commit, so it rides the zip pin with it."
+review = "https://github.com/huggingface/candle/issues/4074"
+recorded_on = "2026-10-30"
+expires_on = "2027-01-30"
+version = "0.11.0"
+upstream_issue = "https://github.com/huggingface/candle/issues/4074"
+upstream_pr = "https://github.com/huggingface/candle/pull/4078"
+patch_digest = "git:9515d410e3af803fd45efebfef8137f47d85a63d"
+
 [[patch]]
 crate = "ring"
 kind = "provider-exception"

@@ -23,9 +23,9 @@ on:
 # rather than maximising the number of jobs. 35 jobs, each compiling its own copy
 # of the workspace, put 7,500 job-seconds through six instances and took
 # 21.4 minutes (run 37579691890). Lanes that build the same feature set share a
-# job (the lane table's `group`), and only the two check-row jobs and the
-# acceptance receipt wait on another job: each of them reads a result instead of
-# building one.
+# job (the lane table's `group`), and only the two check-row jobs wait on
+# another job (the required row also records the acceptance receipt): each of
+# them reads a result instead of building one.
 #
 # Every job that builds names the one instance it runs on (`lwc-1` .. `lwc-13`,
 # runner labels). An instance keeps one target directory and one container
@@ -561,44 +561,6 @@ jobs:
         # Stops before the job limit so the cache is saved (see the build job).
         timeout-minutes: 3
         run: cargo nextest run -p lgwks_std --all-targets --locked --features full ${PARTITION:+--partition $PARTITION}
-
-  acceptance_receipts:
-    # The receipt, built from the JUnit reports the shards already wrote. The
-    # job builds one small binary (`acceptance-receipts`, std only) and reads the
-    # XML files with it, so it costs seconds, not a second run of the tests.
-    name: Acceptance receipts
-    needs: [tests_bot_full, tests_linux, process-windows]
-    runs-on: [self-hosted, macOS, ARM64, lwc]
-    timeout-minutes: 5
-    env:
-      REVISION: ${{ github.sha }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: Pin Rust 1.99.0
-        uses: ./.github/actions/local-rust
-        with:
-          toolchain: "1.99.1"
-          # It runs no tests and it is the last link of the run's critical path.
-          tmp-gib: "0"
-          defer: "0"
-      - name: Download lgwks-bot JUnit reports
-        uses: actions/download-artifact@v8
-        with:
-          pattern: lgwks-bot-junit-*
-          path: acceptance-artifact
-      - name: Download the Linux and Windows JUnit reports
-        uses: actions/download-artifact@v8
-        with:
-          pattern: acceptance-junit-*
-          path: acceptance-junit
-      - name: Record acceptance receipts
-        run: cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision "$REVISION" --platform "$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)" && cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-junit/acceptance-junit-linux/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-linux.json --revision "$REVISION" --platform linux-aarch64 && cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --map docs/acceptance/t-rows-windows.toml --features process,script,ephemeral --from-junit acceptance-junit/acceptance-junit-windows/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-windows.json --revision "$REVISION" --platform windows-x86_64
-      - name: Upload acceptance receipt
-        uses: actions/upload-artifact@v7
-        with:
-          name: acceptance-receipts
-          path: acceptance-artifact/
-          retention-days: 30
 
   # The lgwks-bot suite at no default features, in a job of its own. The
   # lgwks-std per-feature suites live in the feature-matrix job below: they
@@ -1281,7 +1243,7 @@ jobs:
     env:
       # Lints run once, in the Clippy job.
       RUSTC_WORKSPACE_WRAPPER: ""
-      # This job is the acceptance receipts' last `needs`, and its first cargo
+      # The acceptance receipts (recorded in the required row) wait on this job, and its first cargo
       # line, `Updating crates.io index`, took 75 s and 93 s of its 221 s and 290 s
       # on main runs 39106771175 and 39107070152: the second ended the run at
       # 326 s, 47 s after the saturation legs. On a hosted Windows runner the
@@ -1369,15 +1331,25 @@ jobs:
   # jobs in series, 29 s of a 268 s run, for one API call.
   build_verdict:
     name: Build and workspace tests
-    needs: [build, workspace_tail, gate, advisories, simulation_evidence, debug_e2e, tests_bot_full, tests_std_full, acceptance_receipts, tests_nodefault, tests_linux, clippy, docs, storefront-matrix, target-matrix, timing_gates, timing_async, feature-matrix-bot-ast, appcui-native, appcui-native-hosted, gpui-windows, process-windows, clippy_verdict, miri_unsafe]
+    needs: [build, workspace_tail, gate, advisories, simulation_evidence, debug_e2e, tests_bot_full, tests_std_full, tests_nodefault, tests_linux, clippy, docs, storefront-matrix, target-matrix, timing_gates, timing_async, feature-matrix-bot-ast, appcui-native, appcui-native-hosted, gpui-windows, process-windows, clippy_verdict, miri_unsafe]
     if: ${{ always() }}
     # On an instance, not a hosted runner: this row starts when the bot-full
-    # job ends and is the run's last link beside the receipts, and a hosted
-    # runner's pick-up took 2 s on main run 39090275332 and 56 s on run
-    # 39091155164 (queued 02:48:38, started 02:49:34, the run's wall 314 s
-    # against the 300 s #272 requires). Its work is two shell commands.
+    # job ends and is the run's last link, and a hosted runner's pick-up took
+    # 2 s on main run 39090275332 and 56 s on run 39091155164 (queued 02:48:38,
+    # started 02:49:34, the run's wall 314 s against the 300 s #272 requires).
+    #
+    # The acceptance receipt is recorded here, not in a job of its own. As its
+    # own job it was a second pickup, setup and teardown in series with this
+    # one on the run's last link: on run 41157994919 the bot-full job ended at
+    # 02:04:47, the receipts job ran 02:04:51-02:05:36 (45 s for 8 s of
+    # recording), this row started at 02:05:39, and the wall was 301 s. The
+    # receipts read the JUnit reports of tests_bot_full, tests_linux and
+    # process-windows, all of which this row already needs, and a receipt that
+    # cannot be recorded now fails the required row.
     runs-on: [self-hosted, macOS, ARM64, lwc]
     timeout-minutes: 5
+    env:
+      REVISION: ${{ github.sha }}
     steps:
       - name: Every workspace test job passed
         env:
@@ -1388,6 +1360,35 @@ jobs:
         run: |
           echo "workspace ${BUILD}, its tail ${TAIL}, lgwks_bot full and saturation ${BOT_FULL}, lgwks_bot no default ${BOT_NODEFAULT}"
           test "${BUILD}" = success && test "${TAIL}" = success && test "${BOT_FULL}" = success && test "${BOT_NODEFAULT}" = success
+      # The receipt, built from the JUnit reports the test jobs already wrote.
+      # One small binary (`acceptance-receipts`, std only) reads the XML files,
+      # so it costs seconds, not a second run of the tests.
+      - uses: actions/checkout@v7
+      - name: Pin Rust 1.99.0
+        uses: ./.github/actions/local-rust
+        with:
+          toolchain: "1.99.1"
+          # It runs no tests and it is the last link of the run's critical path.
+          tmp-gib: "0"
+          defer: "0"
+      - name: Download lgwks-bot JUnit reports
+        uses: actions/download-artifact@v8
+        with:
+          pattern: lgwks-bot-junit-*
+          path: acceptance-artifact
+      - name: Download the Linux and Windows JUnit reports
+        uses: actions/download-artifact@v8
+        with:
+          pattern: acceptance-junit-*
+          path: acceptance-junit
+      - name: Record acceptance receipts
+        run: cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-artifact/*/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts.json --revision "$REVISION" --platform "$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)" && cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --from-junit acceptance-junit/acceptance-junit-linux/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-linux.json --revision "$REVISION" --platform linux-aarch64 && cargo run --locked -p lgwks_deps --bin acceptance-receipts -- --map docs/acceptance/t-rows-windows.toml --features process,script,ephemeral --from-junit acceptance-junit/acceptance-junit-windows/junit.xml --db acceptance-artifact/receipts.sqlite --export acceptance-artifact/acceptance-receipts-windows.json --revision "$REVISION" --platform windows-x86_64
+      - name: Upload acceptance receipt
+        uses: actions/upload-artifact@v7
+        with:
+          name: acceptance-receipts
+          path: acceptance-artifact/
+          retention-days: 30
       - name: Run wall is at most 300 seconds
         if: ${{ always() }}
         env:

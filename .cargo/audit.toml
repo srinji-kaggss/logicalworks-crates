@@ -12,13 +12,6 @@
 
 [advisories]
 ignore = [
-  # SECURITY.md, "`zip 8.6.0`: RUSTSEC-2026-0367, -0368, -0369": SUID/SGID bits
-  # preserved on extraction, symlink targets outside the destination, and
-  # permissions applied through symlinks. candle-core is zip's only parent and
-  # never calls `extract`.
-  "RUSTSEC-2026-0367",
-  "RUSTSEC-2026-0368",
-  "RUSTSEC-2026-0369",
   # SECURITY.md, "Unmaintained transitive crates": the ten ids behind `gpui` or
   # the Candle features, all default-off, none with a patched version.
   # rustybuzz/ttf-parser: gpui -> cosmic-text, usvg; reopen if gpui moves to a

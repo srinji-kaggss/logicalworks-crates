@@ -58,27 +58,16 @@ version. Dependabot alert #1 is dismissed as
 `insert_*`, or `prepend_*` method, or if a newer `grid 0.18.x` or `taffy 0.9.x`
 appears. Either would make the version bump available and this entry obsolete.
 
-### `zip 8.6.0`: RUSTSEC-2026-0367, -0368, -0369, extraction writes outside the destination
+### `zip 8.6.0`: RUSTSEC-2026-0367, -0368, -0369 and GHSA-m665-v7pm-7grj, fixed by an upstream pin
 
-Reached only by enabling the `ml-candle` storefront features of `lgwks_deps`
-(default-off): `lgwks_deps` → `candle-core 0.11.0` → `zip 8.6.0`. Unreachable,
-on three checks (2026-10-20):
+`candle-core 0.11.0` on crates.io requires `zip ^8.6`. We filed
+huggingface/candle#4074, and upstream merged zip 9.1.3 in #4078 (2026-10-30).
+The candle edges now resolve that merge commit, `9515d41`, through an
+`upstream-pin` row in `contract/PATCHES.toml`, and the lockfile holds
+`zip 9.1.3`. None of the three ids is silenced in `.cargo/audit.toml` any more.
 
-1. `cargo tree -i zip@8.6.0 --all-features --target all` shows `candle-core` is
-   the only parent `zip` has in the graph.
-2. All three advisories are in `ZipArchive::extract` and
-   `ZipStreamReader::extract`: SUID/SGID bits kept, symlink targets outside the
-   destination, and permissions applied through symlinks.
-3. `candle-core` never extracts. Its entire use of the crate is
-   `ZipArchive::new`, `by_name`, `by_index` and `zip::result::ZipError`
-   (`src/npy.rs`, `src/pickle.rs`, `src/error.rs`). It reads tensors into memory
-   and writes nothing to disk.
-
-There is no version bump that resolves it: `candle-core 0.11.0` is the newest
-release and requires `zip` 8, and the fix ships only in `zip >= 9.0.0`.
-
-**Reopen if** `candle-core` calls any `extract` method, or if a release
-requiring `zip >= 9` appears; that bump makes this entry obsolete.
+**Reopen if** the pin is removed before a candle release requiring
+`zip >= 9.0.5` publishes.
 
 ### Unmaintained transitive crates: ten default-off advisories behind `gpui` or Candle
 
@@ -92,7 +81,7 @@ feature (assessed 2026-10-20); the lockfile stays where `cargo update` leaves it
 | `async-std` 1.13.2; `rustls-pemfile` 2.2.0 | RUSTSEC-2025-0052, -0134 | `gpui` → `gpui_http_client` → `zed-async-tar`, `zed-reqwest` | `gpui` ships, or its HTTP client leaves the Zed forks |
 | `instant` 0.1.13; `proc-macro-error2` 2.0.1 | RUSTSEC-2024-0384, -0173 | `gpui` → `gpui_util` → `futures-lite` → `fastrand`; `gpui` → `stacksafe` → `stacksafe-macro` | `gpui` ships, or those parents drop them |
 | `zbus_names` 4.3.4; `zvariant` 5.15.0; `zvariant_derive` 5.15.0 | RUSTSEC-2026-0371, -0370, -0372 | `gpui` → `ashpd`, `oo7` → `zbus 5.19.0` → these three | `gpui` moves to `zbus` 6 (where these are modules), or ships |
-| `paste` 1.0.15 | RUSTSEC-2024-0436 | `gpui` → `image`, `metal`; `ml-candle` → `candle-core`, `tokenizers 0.22.2`; `ml-tokenizers` → `tokenizers 0.23.2` | any of the three features ships, or those parents drop `paste` |
+| `paste` 1.0.15 | RUSTSEC-2024-0436 | `gpui` → `image`, `metal`; `ml-candle` → `candle-core`, `gemm`, `pulp`; `ml-tokenizers` → `tokenizers 0.23.2` | any of the three features ships, or those parents drop `paste` |
 
 ### `rsa 0.10.0-rc.19`: RUSTSEC-2023-0071, Marvin timing sidechannel
 
