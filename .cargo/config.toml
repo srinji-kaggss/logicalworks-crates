@@ -11,6 +11,13 @@
 [build]
 rustc-workspace-wrapper = "clippy-driver"
 
+# The candle upstream pin (contract/PATCHES.toml) is a git source. Cargo's
+# built-in fetch ignores `url.*.insteadOf` auth, and a runner whose git config
+# rewrites https://github.com/ to ssh failed with "no authentication methods
+# succeeded"; the git CLI honours the user's own git config.
+[net]
+git-fetch-with-cli = true
+
 # The LLVM linker, not Apple's ld: the link step is a large share of a
 # from-scratch build and ld64.lld is several times faster than the default.
 [target.aarch64-apple-darwin]

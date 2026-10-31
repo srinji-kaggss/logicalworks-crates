@@ -178,9 +178,15 @@ tokio = { version = "1", default-features = false, features = ["rt"], optional =
 # weights load from local files; `candle-transformers` itself pulls `hf-hub`,
 # so selecting `ml-candle` does compile a network-capable closure even though
 # the runtime reads a local checkpoint.
-candle-core = { version = "0.11", optional = true }
-candle-nn = { version = "0.11", optional = true }
-candle-transformers = { version = "0.11", default-features = false, optional = true }
+#
+# Upstream pin (contract/PATCHES.toml): candle 0.11.0 on crates.io requires
+# zip ^8.6, covered by RUSTSEC-2026-0367..0369 and GHSA-m665-v7pm-7grj.
+# huggingface/candle#4078 moved it to zip 9.1.3; the workspace builds that
+# merge commit until 0.11.1 publishes. `cargo publish` drops `git` and keeps
+# `version`, so the published crate still names the registry release.
+candle-core = { version = "0.11", git = "https://github.com/huggingface/candle", rev = "9515d410e3af803fd45efebfef8137f47d85a63d", optional = true }
+candle-nn = { version = "0.11", git = "https://github.com/huggingface/candle", rev = "9515d410e3af803fd45efebfef8137f47d85a63d", optional = true }
+candle-transformers = { version = "0.11", git = "https://github.com/huggingface/candle", rev = "9515d410e3af803fd45efebfef8137f47d85a63d", default-features = false, optional = true }
 tokenizers = { version = "0.23", optional = true }
 # Interim zoned time: jiff with system zoneinfo plus bundled fallback, no
 # default features so the no-flag build stays portable. Consumers opt in via
